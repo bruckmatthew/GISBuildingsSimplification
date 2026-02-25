@@ -4,7 +4,13 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-def run_pipeline(input_path: str, output_path: str, basemap: str = "google") -> dict[str, Any]:
+def run_pipeline(
+    input_path: str,
+    output_path: str,
+    basemap: str = "google",
+    garage_threshold_m2: float = 50.0,
+    garage_reclass: str = "Shed",
+) -> dict[str, Any]:
     from app.cleaning import (
         commercial_industrial_merge_pass,
         simplify_geometry,
@@ -32,7 +38,11 @@ def run_pipeline(input_path: str, output_path: str, basemap: str = "google") -> 
     gdf, topo_stats = topology_qa_and_fixes(gdf)
 
     # 4) Recategorize small garages
-    gdf, recategorized_count = recategorize_small_garages(gdf)
+    gdf, recategorized_count = recategorize_small_garages(
+        gdf,
+        garage_threshold_m2=garage_threshold_m2,
+        garage_reclass=garage_reclass,
+    )
 
     # 5) Corner-cleaning pass
     gdf, corner_changed_count = corner_cleaning_pass(gdf)
@@ -69,6 +79,8 @@ def run_pipeline(input_path: str, output_path: str, basemap: str = "google") -> 
         },
         "pipeline": {
             "basemap": basemap,
+            "garage_threshold_m2": garage_threshold_m2,
+            "garage_reclass": garage_reclass,
             "simplify_tolerance": simplify_tolerance,
             "qa_summary": qa_summary,
             **topo_stats,
@@ -96,13 +108,30 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["google", "osm", "satellite"],
         help="Basemap profile to tune simplification",
     )
+    parser.add_argument(
+        "--garage-threshold-m2",
+        type=float,
+        default=50.0,
+        help="Area threshold in square meters for reclassifying planning_z='Garage' features",
+    )
+    parser.add_argument(
+        "--garage-reclass",
+        default="Shed",
+        help="Target category to assign to garages under the threshold",
+    )
     return parser
 
 
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    report = run_pipeline(args.input, args.output, args.basemap)
+    report = run_pipeline(
+        args.input,
+        args.output,
+        args.basemap,
+        garage_threshold_m2=args.garage_threshold_m2,
+        garage_reclass=args.garage_reclass,
+    )
 
     print("Pipeline complete")
     print(f"- Output shapefile: {report['export']['output_path']}")

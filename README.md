@@ -37,13 +37,13 @@ pip install -r requirements.txt
 ### macOS / Linux
 
 ```bash
-python -m app.main --input <buildings.shp> --output <cleaned.shp> --basemap google
+python -m app.main --input <buildings.shp> --output <cleaned.shp> --basemap google --garage-threshold-m2 50 --garage-reclass Shed
 ```
 
 ### Windows PowerShell
 
 ```powershell
-python -m app.main --input <buildings.shp> --output <cleaned.shp> --basemap google
+python -m app.main --input <buildings.shp> --output <cleaned.shp> --basemap google --garage-threshold-m2 50 --garage-reclass Shed
 ```
 
 Outputs created next to `<cleaned.shp>`:
