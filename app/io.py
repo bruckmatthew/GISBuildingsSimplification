@@ -123,6 +123,38 @@ def write_shapefile(gdf: gpd.GeoDataFrame, output_path: str | Path) -> dict[str,
     }
 
 
+def write_review_layer(gdf: gpd.GeoDataFrame, output_path: str | Path) -> dict[str, Any] | None:
+    if "review_action" not in gdf.columns:
+        return None
+
+    review_candidates = gdf[gdf["review_action"] == "needs_review"].copy()
+    if review_candidates.empty:
+        return None
+
+    out = Path(output_path)
+    review_path = out.with_name(f"{out.stem}_needs_review.shp")
+
+    original_crs = gdf.attrs.get("original_crs")
+    if original_crs is not None and review_candidates.crs is not None:
+        if str(original_crs) != str(review_candidates.crs):
+            review_candidates = review_candidates.to_crs(original_crs)
+
+    review_path.parent.mkdir(parents=True, exist_ok=True)
+    review_candidates.to_file(review_path)
+
+    review_files = []
+    for suffix in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
+        candidate = review_path.with_suffix(suffix)
+        if candidate.exists():
+            review_files.append(candidate)
+
+    return {
+        "review_layer_path": str(review_path),
+        "review_created_files": [str(path) for path in review_files],
+        "review_feature_count": int(len(review_candidates)),
+    }
+
+
 def write_qa_report(report: dict[str, Any], output_path: str | Path) -> Path:
     out = Path(output_path)
     qa_path = out.with_name(f"{out.stem}_qa_report.json")

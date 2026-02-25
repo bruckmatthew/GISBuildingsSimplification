@@ -22,9 +22,10 @@ def run_pipeline(
         validate_input_shapefile,
         write_qa_report,
         write_qa_summary,
+        write_review_layer,
         write_shapefile,
     )
-    from app.review import corner_cleaning_pass
+    from app.review import run_corner_fix_review
     from app.rules import recategorize_small_garages
 
     # 1) Load and validate input
@@ -44,8 +45,8 @@ def run_pipeline(
         garage_reclass=garage_reclass,
     )
 
-    # 5) Corner-cleaning pass
-    gdf, corner_changed_count = corner_cleaning_pass(gdf)
+    # 5) Corner-cleaning pass (auto-clean + review queue)
+    gdf, needs_review_layer, review_stats = run_corner_fix_review(gdf, basemap=basemap)
 
     # 6) Commercial/industrial merge pass
     before_merge_count = len(gdf)
@@ -61,6 +62,9 @@ def run_pipeline(
 
     # 8) Export outputs and QA report
     export_info = write_shapefile(gdf, output_path)
+    review_export = write_review_layer(needs_review_layer, output_path)
+    if review_export is not None:
+        export_info.update(review_export)
 
     qa_summary = {
         "count_simplified": simplified_count,
@@ -85,7 +89,9 @@ def run_pipeline(
             "qa_summary": qa_summary,
             **topo_stats,
             "recategorized_small_garages": recategorized_count,
-            "corner_cleaned_features": corner_changed_count,
+            "corner_cleaned_features": review_stats["auto_cleaned_count"],
+            "corner_needs_review_features": review_stats["needs_review_count"],
+            "review_basemap_provider": review_stats["provider"],
             "feature_count_before_merge": before_merge_count,
             "feature_count_after_merge": after_merge_count,
         },
