@@ -1,45 +1,113 @@
 from __future__ import annotations
 
+import hashlib
+
 import pandas as pd
 import geopandas as gpd
-from shapely import make_valid
+from shapely import make_valid, normalize, set_precision
 from shapely.geometry import MultiPolygon, Polygon
 
 
-def _strip_small_holes(geom, min_hole_area: float = 1.0):
+def _strip_small_holes(geom, min_hole_area: float = 1.0, remove_all_holes: bool = True):
     if geom is None or geom.is_empty:
-        return geom
+        return geom, 0, 0
+
+    removed_count = 0
+    preserved_count = 0
 
     def filter_polygon(poly: Polygon) -> Polygon:
+        nonlocal removed_count, preserved_count
         holes = []
         for ring in poly.interiors:
             hole = Polygon(ring)
+            if remove_all_holes:
+                removed_count += 1
+                continue
+
             if hole.area >= min_hole_area:
                 holes.append(ring)
+                preserved_count += 1
+            else:
+                removed_count += 1
         return Polygon(poly.exterior, holes)
 
     if isinstance(geom, Polygon):
-        return filter_polygon(geom)
+        return filter_polygon(geom), removed_count, preserved_count
     if isinstance(geom, MultiPolygon):
-        return MultiPolygon([filter_polygon(p) for p in geom.geoms])
-    return geom
+        return MultiPolygon([filter_polygon(p) for p in geom.geoms]), removed_count, preserved_count
+    return geom, 0, 0
 
 
-def simplify_geometry(gdf: gpd.GeoDataFrame, basemap: str) -> tuple[gpd.GeoDataFrame, float]:
-    tol_map = {
-        "google": 0.15,
-        "osm": 0.25,
-        "satellite": 0.1,
+def strip_small_holes(
+    gdf: gpd.GeoDataFrame,
+    min_hole_area: float = 25.0,
+    remove_all_holes: bool = True,
+) -> tuple[gpd.GeoDataFrame, dict[str, int]]:
+    """
+    Remove holes from polygonal geometries and report counts.
+
+    By default this strips all holes so no courtyards/interior voids remain.
+    Set `remove_all_holes=False` to keep larger holes using `min_hole_area`.
+    The threshold is expressed in square meters in the default pipeline flow
+    because geometries are loaded into a metric CRS in `app.io`.
+    """
+    out = gdf.copy()
+
+    hole_removed_count = 0
+    hole_preserved_count = 0
+    cleaned_geoms = []
+    for geom in out.geometry:
+        cleaned, removed, preserved = _strip_small_holes(
+            geom,
+            min_hole_area=min_hole_area,
+            remove_all_holes=remove_all_holes,
+        )
+        cleaned_geoms.append(cleaned)
+        hole_removed_count += removed
+        hole_preserved_count += preserved
+
+    out.geometry = cleaned_geoms
+    return out, {
+        "holes_removed_count": hole_removed_count,
+        "holes_preserved_count": hole_preserved_count,
     }
-    tolerance = tol_map.get(basemap.lower(), 0.2)
+
+
+def _normalized_geom_hash(geom, snap_grid_m: float = 0.1) -> str:
+    if geom is None or geom.is_empty:
+        return ""
+
+    rounded = set_precision(geom, grid_size=snap_grid_m) if snap_grid_m > 0 else geom
+
+    canonical = normalize(rounded)
+    return hashlib.sha1(canonical.wkb).hexdigest()
+
+
+def simplify_geometry(
+    gdf: gpd.GeoDataFrame,
+    basemap: str,
+    tolerance_m: float | None = None,
+) -> tuple[gpd.GeoDataFrame, float, int]:
+    tol_map = {
+        "google": 0.2,
+        "osm": 0.35,
+        "satellite": 0.15,
+    }
+    tolerance = tolerance_m if tolerance_m is not None else tol_map.get(basemap.lower(), 0.25)
 
     out = gdf.copy()
+    original_wkb = out.geometry.to_wkb()
     out.geometry = out.geometry.simplify(tolerance=tolerance, preserve_topology=True)
-    out.geometry = out.geometry.map(_strip_small_holes)
-    return out, tolerance
+    simplified_count = int((original_wkb != out.geometry.to_wkb()).sum())
+    return out, tolerance, simplified_count
 
 
-def topology_qa_and_fixes(gdf: gpd.GeoDataFrame) -> tuple[gpd.GeoDataFrame, dict[str, int]]:
+def topology_qa_and_fixes(
+    gdf: gpd.GeoDataFrame,
+    overlap_area_threshold: float = 0.5,
+    min_hole_area: float = 25.0,
+    near_duplicate_grid_m: float = 0.1,
+) -> tuple[gpd.GeoDataFrame, dict[str, int]]:
     out = gdf.copy()
 
     invalid_mask = ~out.geometry.is_valid
@@ -50,12 +118,19 @@ def topology_qa_and_fixes(gdf: gpd.GeoDataFrame) -> tuple[gpd.GeoDataFrame, dict
     before = len(out)
     out["_geom_wkb"] = out.geometry.to_wkb()
     out = out.drop_duplicates(subset=["_geom_wkb"]).drop(columns=["_geom_wkb"])
-    duplicate_removed_count = before - len(out)
+    exact_duplicate_removed_count = before - len(out)
 
-    overlap_flagged_count = 0
+    before_near = len(out)
+    out["_near_hash"] = out.geometry.map(lambda geom: _normalized_geom_hash(geom, near_duplicate_grid_m))
+    out = out.drop_duplicates(subset=["_near_hash"]).drop(columns=["_near_hash"])
+    near_duplicate_removed_count = before_near - len(out)
+    duplicate_removed_count = exact_duplicate_removed_count + near_duplicate_removed_count
+
+    overlap_fixed_count = 0
     if len(out) > 1:
         sindex = out.sindex
         checked = set()
+        updated_geoms = out.geometry.copy()
         for idx, geom in out.geometry.items():
             for cand in sindex.intersection(geom.bounds):
                 if cand == idx:
@@ -64,14 +139,45 @@ def topology_qa_and_fixes(gdf: gpd.GeoDataFrame) -> tuple[gpd.GeoDataFrame, dict
                 if key in checked:
                     continue
                 checked.add(key)
-                other = out.loc[cand, "geometry"]
-                if geom.intersects(other) and geom.intersection(other).area > 0:
-                    overlap_flagged_count += 1
+                if idx not in updated_geoms.index or cand not in updated_geoms.index:
+                    continue
+
+                a = updated_geoms.loc[idx]
+                b = updated_geoms.loc[cand]
+                if a is None or b is None or a.is_empty or b.is_empty:
+                    continue
+                if not a.intersects(b):
+                    continue
+
+                inter_area = a.intersection(b).area
+                if inter_area <= overlap_area_threshold:
+                    continue
+
+                if a.area >= b.area:
+                    fixed = make_valid(b.difference(a))
+                    updated_geoms.loc[cand] = fixed
+                else:
+                    fixed = make_valid(a.difference(b))
+                    updated_geoms.loc[idx] = fixed
+                overlap_fixed_count += 1
+
+        out.geometry = updated_geoms
+        out = out[~out.geometry.is_empty].copy()
+
+    out, hole_stats = strip_small_holes(
+        out,
+        min_hole_area=min_hole_area,
+        remove_all_holes=True,
+    )
 
     return out, {
         "invalid_fixed_count": invalid_fixed_count,
         "duplicate_removed_count": duplicate_removed_count,
-        "overlap_flagged_count": overlap_flagged_count,
+        "exact_duplicate_removed_count": exact_duplicate_removed_count,
+        "near_duplicate_removed_count": near_duplicate_removed_count,
+        "overlap_fixed_count": overlap_fixed_count,
+        "holes_removed_count": hole_stats["holes_removed_count"],
+        "holes_preserved_count": hole_stats["holes_preserved_count"],
     }
 
 
