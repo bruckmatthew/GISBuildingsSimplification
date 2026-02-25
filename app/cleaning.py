@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+from collections import defaultdict
 
 import pandas as pd
 import geopandas as gpd
 from shapely import make_valid, normalize, set_precision
 from shapely.geometry import MultiPolygon, Polygon
+from shapely.ops import unary_union
 
 
 def _strip_small_holes(geom, min_hole_area: float = 1.0, remove_all_holes: bool = True):
@@ -181,24 +183,153 @@ def topology_qa_and_fixes(
     }
 
 
-def commercial_industrial_merge_pass(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+def _longest_shared_boundary(shared_edge) -> float:
+    if shared_edge is None or shared_edge.is_empty:
+        return 0.0
+    return float(shared_edge.length)
+
+
+def _is_commercial_or_industrial(value: object) -> bool:
+    if value is None:
+        return False
+
+    text = str(value).strip().lower()
+    if not text:
+        return False
+
+    # Handles class values like "Commercial/Business" and "Industrial/Utilities"
+    return text.startswith("commercial") or text.startswith("industrial")
+
+
+def _blocked_by_barriers(
+    shared_edge,
+    barriers_union,
+    tol: float = 0.01,
+) -> bool:
+    if barriers_union is None or shared_edge.is_empty:
+        return False
+    barrier_cut = shared_edge.buffer(tol, cap_style=2).intersection(barriers_union)
+    return not barrier_cut.is_empty
+
+
+def _pick_representative_row(cluster: gpd.GeoDataFrame, source_id_col: str) -> pd.Series:
+    areas = cluster.geometry.area
+    ranked = cluster.assign(_area_rank=areas).sort_values(["_area_rank", source_id_col], ascending=[False, True])
+    return ranked.iloc[0]
+
+
+def commercial_industrial_merge_pass(
+    gdf: gpd.GeoDataFrame,
+    roads_gdf: gpd.GeoDataFrame | None = None,
+    parcels_gdf: gpd.GeoDataFrame | None = None,
+    min_shared_edge_m: float = 1.0,
+) -> gpd.GeoDataFrame:
     out = gdf.copy()
     use_col = "planning_z" if "planning_z" in out.columns else None
     if use_col is None:
         return out
 
-    target_mask = out[use_col].fillna("").str.lower().str.contains("commercial|industrial")
+    out["source_geom_id"] = out.index.map(lambda idx: f"geom_{idx}")
+    out["merge_pass"] = "original"
+    out["merge_cluster_id"] = pd.NA
+    out["merged_from_ids"] = pd.NA
+
+    target_mask = out[use_col].map(_is_commercial_or_industrial)
     if not target_mask.any():
-        out["merge_pass"] = "original"
+        out.attrs["merge_log"] = []
         return out
 
     target = out[target_mask].copy()
     non_target = out[~target_mask].copy()
 
-    merged_geom = target.dissolve().explode(index_parts=False).reset_index(drop=True)
-    merged_geom[use_col] = "Commercial/Industrial"
-    merged_geom["merge_pass"] = "merged"
+    barrier_geoms = []
+    if roads_gdf is not None and not roads_gdf.empty:
+        barrier_geoms.extend([geom for geom in roads_gdf.geometry if geom is not None and not geom.is_empty])
+    if parcels_gdf is not None and not parcels_gdf.empty:
+        barrier_geoms.extend([geom for geom in parcels_gdf.geometry if geom is not None and not geom.is_empty])
+    barriers_union = unary_union(barrier_geoms) if barrier_geoms else None
 
-    non_target["merge_pass"] = "original"
-    combined = pd.concat([non_target, merged_geom], ignore_index=True, sort=False)
-    return gpd.GeoDataFrame(combined, geometry="geometry", crs=gdf.crs)
+    sindex = target.sindex
+    parent = {idx: idx for idx in target.index}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for idx, geom in target.geometry.items():
+        if geom is None or geom.is_empty:
+            continue
+        candidates = [cand for cand in sindex.intersection(geom.bounds) if cand > idx]
+        for cand in candidates:
+            other = target.geometry.loc[cand]
+            if other is None or other.is_empty:
+                continue
+            shared_edge = geom.boundary.intersection(other.boundary)
+            shared_len = _longest_shared_boundary(shared_edge)
+            if shared_len < min_shared_edge_m:
+                continue
+            if _blocked_by_barriers(shared_edge, barriers_union):
+                continue
+            union(idx, cand)
+
+    cluster_members = defaultdict(list)
+    for idx in target.index:
+        cluster_members[find(idx)].append(idx)
+
+    merged_rows: list[dict] = []
+    merge_log: list[dict[str, object]] = []
+    cluster_num = 1
+
+    for members in cluster_members.values():
+        members_sorted = sorted(members)
+        cluster = target.loc[members_sorted].copy()
+        rep = _pick_representative_row(cluster, "source_geom_id")
+        cluster_id = f"ci_cluster_{cluster_num:04d}"
+
+        if len(cluster) == 1:
+            row = rep.drop(labels=["_area_rank"], errors="ignore").to_dict()
+            row["merge_cluster_id"] = cluster_id
+            row["merged_from_ids"] = rep["source_geom_id"]
+            merged_rows.append(row)
+            merge_log.append(
+                {
+                    "cluster_id": cluster_id,
+                    "before_ids": [rep["source_geom_id"]],
+                    "after_id": rep["source_geom_id"],
+                    "member_count": 1,
+                }
+            )
+            cluster_num += 1
+            continue
+
+        merged_geom = unary_union(cluster.geometry.tolist())
+        source_ids = sorted(cluster["source_geom_id"].astype(str).tolist())
+        row = rep.drop(labels=["_area_rank"], errors="ignore").to_dict()
+        row["geometry"] = merged_geom
+        row[use_col] = "Commercial/Industrial"
+        row["merge_pass"] = "merged"
+        row["merge_cluster_id"] = cluster_id
+        row["merged_from_ids"] = "|".join(source_ids)
+        merged_rows.append(row)
+        merge_log.append(
+            {
+                "cluster_id": cluster_id,
+                "before_ids": source_ids,
+                "after_id": cluster_id,
+                "member_count": len(source_ids),
+            }
+        )
+        cluster_num += 1
+
+    merged_target = gpd.GeoDataFrame(merged_rows, geometry="geometry", crs=gdf.crs)
+    combined = pd.concat([non_target, merged_target], ignore_index=True, sort=False)
+    result = gpd.GeoDataFrame(combined, geometry="geometry", crs=gdf.crs)
+    result.attrs["merge_log"] = merge_log
+    return result

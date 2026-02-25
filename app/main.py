@@ -52,6 +52,7 @@ def run_pipeline(
     before_merge_count = len(gdf)
     gdf = commercial_industrial_merge_pass(gdf)
     after_merge_count = len(gdf)
+    merge_log = gdf.attrs.get("merge_log", [])
 
     # 7) Final hole cleanup after all geometry-modifying passes
     gdf, post_merge_hole_stats = strip_small_holes(gdf)
@@ -94,6 +95,8 @@ def run_pipeline(
             "review_basemap_provider": review_stats["provider"],
             "feature_count_before_merge": before_merge_count,
             "feature_count_after_merge": after_merge_count,
+            "merge_log_count": len(merge_log),
+            "merge_log": merge_log,
         },
         "export": export_info,
     }
