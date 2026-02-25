@@ -8,7 +8,7 @@ from shapely import make_valid, normalize, set_precision
 from shapely.geometry import MultiPolygon, Polygon
 
 
-def _strip_small_holes(geom, min_hole_area: float = 1.0):
+def _strip_small_holes(geom, min_hole_area: float = 1.0, remove_all_holes: bool = True):
     if geom is None or geom.is_empty:
         return geom, 0, 0
 
@@ -20,6 +20,10 @@ def _strip_small_holes(geom, min_hole_area: float = 1.0):
         holes = []
         for ring in poly.interiors:
             hole = Polygon(ring)
+            if remove_all_holes:
+                removed_count += 1
+                continue
+
             if hole.area >= min_hole_area:
                 holes.append(ring)
                 preserved_count += 1
@@ -32,6 +36,41 @@ def _strip_small_holes(geom, min_hole_area: float = 1.0):
     if isinstance(geom, MultiPolygon):
         return MultiPolygon([filter_polygon(p) for p in geom.geoms]), removed_count, preserved_count
     return geom, 0, 0
+
+
+def strip_small_holes(
+    gdf: gpd.GeoDataFrame,
+    min_hole_area: float = 25.0,
+    remove_all_holes: bool = True,
+) -> tuple[gpd.GeoDataFrame, dict[str, int]]:
+    """
+    Remove holes from polygonal geometries and report counts.
+
+    By default this strips all holes so no courtyards/interior voids remain.
+    Set `remove_all_holes=False` to keep larger holes using `min_hole_area`.
+    The threshold is expressed in square meters in the default pipeline flow
+    because geometries are loaded into a metric CRS in `app.io`.
+    """
+    out = gdf.copy()
+
+    hole_removed_count = 0
+    hole_preserved_count = 0
+    cleaned_geoms = []
+    for geom in out.geometry:
+        cleaned, removed, preserved = _strip_small_holes(
+            geom,
+            min_hole_area=min_hole_area,
+            remove_all_holes=remove_all_holes,
+        )
+        cleaned_geoms.append(cleaned)
+        hole_removed_count += removed
+        hole_preserved_count += preserved
+
+    out.geometry = cleaned_geoms
+    return out, {
+        "holes_removed_count": hole_removed_count,
+        "holes_preserved_count": hole_preserved_count,
+    }
 
 
 def _normalized_geom_hash(geom, snap_grid_m: float = 0.1) -> str:
@@ -66,7 +105,7 @@ def simplify_geometry(
 def topology_qa_and_fixes(
     gdf: gpd.GeoDataFrame,
     overlap_area_threshold: float = 0.5,
-    min_hole_area: float = 1.0,
+    min_hole_area: float = 25.0,
     near_duplicate_grid_m: float = 0.1,
 ) -> tuple[gpd.GeoDataFrame, dict[str, int]]:
     out = gdf.copy()
@@ -86,10 +125,6 @@ def topology_qa_and_fixes(
     out = out.drop_duplicates(subset=["_near_hash"]).drop(columns=["_near_hash"])
     near_duplicate_removed_count = before_near - len(out)
     duplicate_removed_count = exact_duplicate_removed_count + near_duplicate_removed_count
-
-    # The spatial index returns positional row ids; normalize to a RangeIndex
-    # so `.loc[...]` lookups in the overlap pass stay aligned after dedup drops.
-    out = out.reset_index(drop=True)
 
     overlap_fixed_count = 0
     if len(out) > 1:
@@ -129,15 +164,11 @@ def topology_qa_and_fixes(
         out.geometry = updated_geoms
         out = out[~out.geometry.is_empty].copy()
 
-    hole_removed_count = 0
-    hole_preserved_count = 0
-    cleaned_geoms = []
-    for geom in out.geometry:
-        cleaned, removed, preserved = _strip_small_holes(geom, min_hole_area=min_hole_area)
-        cleaned_geoms.append(cleaned)
-        hole_removed_count += removed
-        hole_preserved_count += preserved
-    out.geometry = cleaned_geoms
+    out, hole_stats = strip_small_holes(
+        out,
+        min_hole_area=min_hole_area,
+        remove_all_holes=True,
+    )
 
     return out, {
         "invalid_fixed_count": invalid_fixed_count,
@@ -145,8 +176,8 @@ def topology_qa_and_fixes(
         "exact_duplicate_removed_count": exact_duplicate_removed_count,
         "near_duplicate_removed_count": near_duplicate_removed_count,
         "overlap_fixed_count": overlap_fixed_count,
-        "holes_removed_count": hole_removed_count,
-        "holes_preserved_count": hole_preserved_count,
+        "holes_removed_count": hole_stats["holes_removed_count"],
+        "holes_preserved_count": hole_stats["holes_preserved_count"],
     }
 
 

@@ -8,6 +8,7 @@ def run_pipeline(input_path: str, output_path: str, basemap: str = "google") -> 
     from app.cleaning import (
         commercial_industrial_merge_pass,
         simplify_geometry,
+        strip_small_holes,
         topology_qa_and_fixes,
     )
     from app.io import (
@@ -41,7 +42,14 @@ def run_pipeline(input_path: str, output_path: str, basemap: str = "google") -> 
     gdf = commercial_industrial_merge_pass(gdf)
     after_merge_count = len(gdf)
 
-    # 7) Export outputs and QA report
+    # 7) Final hole cleanup after all geometry-modifying passes
+    gdf, post_merge_hole_stats = strip_small_holes(gdf)
+    topo_stats["holes_removed_count"] += post_merge_hole_stats["holes_removed_count"]
+    topo_stats["holes_preserved_count"] += post_merge_hole_stats["holes_preserved_count"]
+    topo_stats["post_merge_holes_removed_count"] = post_merge_hole_stats["holes_removed_count"]
+    topo_stats["post_merge_holes_preserved_count"] = post_merge_hole_stats["holes_preserved_count"]
+
+    # 8) Export outputs and QA report
     export_info = write_shapefile(gdf, output_path)
 
     qa_summary = {
