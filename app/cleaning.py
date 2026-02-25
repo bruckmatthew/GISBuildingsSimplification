@@ -263,12 +263,14 @@ def commercial_industrial_merge_pass(
         if ra != rb:
             parent[rb] = ra
 
-    for idx, geom in target.geometry.items():
+    index_labels = target.index.to_numpy()
+    for pos, (idx, geom) in enumerate(target.geometry.items()):
         if geom is None or geom.is_empty:
             continue
-        candidates = [cand for cand in sindex.intersection(geom.bounds) if cand > idx]
-        for cand in candidates:
-            other = target.geometry.loc[cand]
+        candidates = [cand_pos for cand_pos in sindex.intersection(geom.bounds) if cand_pos > pos]
+        for cand_pos in candidates:
+            cand = index_labels[cand_pos]
+            other = target.geometry.iloc[cand_pos]
             if other is None or other.is_empty:
                 continue
             shared_edge = geom.boundary.intersection(other.boundary)
