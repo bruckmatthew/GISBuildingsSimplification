@@ -87,6 +87,10 @@ def topology_qa_and_fixes(
     near_duplicate_removed_count = before_near - len(out)
     duplicate_removed_count = exact_duplicate_removed_count + near_duplicate_removed_count
 
+    # The spatial index returns positional row ids; normalize to a RangeIndex
+    # so `.loc[...]` lookups in the overlap pass stay aligned after dedup drops.
+    out = out.reset_index(drop=True)
+
     overlap_fixed_count = 0
     if len(out) > 1:
         sindex = out.sindex
