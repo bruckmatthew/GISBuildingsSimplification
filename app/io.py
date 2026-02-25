@@ -128,3 +128,10 @@ def write_qa_report(report: dict[str, Any], output_path: str | Path) -> Path:
     qa_path = out.with_name(f"{out.stem}_qa_report.json")
     qa_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     return qa_path
+
+
+def write_qa_summary(summary: dict[str, Any], output_path: str | Path) -> Path:
+    out = Path(output_path)
+    summary_path = out.with_name(f"{out.stem}_qa_summary.json")
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return summary_path
