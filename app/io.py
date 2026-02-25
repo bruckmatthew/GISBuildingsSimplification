@@ -8,8 +8,9 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 import geopandas as gpd
 
-REQUIRED_SIDECARS = (".shx", ".dbf")
-OPTIONAL_SIDECARS = (".prj", ".cpg", ".qix")
+REQUIRED_SIDECARS = (".shx", ".dbf", ".prj")
+OPTIONAL_SIDECARS = (".cpg",)
+REQUIRED_ATTRIBUTE_FIELDS = ("planning_z",)
 
 
 @dataclass
@@ -34,6 +35,13 @@ def validate_input_shapefile(input_path: str | Path) -> InputValidationResult:
     missing_required = [
         suffix for suffix in REQUIRED_SIDECARS if not _sidecar_path(shp_path, suffix).exists()
     ]
+    if missing_required:
+        missing_display = ", ".join(missing_required)
+        raise FileNotFoundError(
+            "Input shapefile is missing required sidecar files "
+            f"for '{shp_path.name}': {missing_display}."
+        )
+
     present_optional = [
         suffix for suffix in OPTIONAL_SIDECARS if _sidecar_path(shp_path, suffix).exists()
     ]
@@ -44,6 +52,13 @@ def validate_input_shapefile(input_path: str | Path) -> InputValidationResult:
     if "geometry" not in gdf.columns:
         raise ValueError("Input layer has no geometry column.")
 
+    missing_fields = [field for field in REQUIRED_ATTRIBUTE_FIELDS if field not in gdf.columns]
+    if missing_fields:
+        missing_fields_display = ", ".join(missing_fields)
+        raise ValueError(
+            f"Input layer is missing required attribute field(s): {missing_fields_display}."
+        )
+
     return InputValidationResult(
         path=shp_path,
         row_count=len(gdf),
@@ -53,13 +68,35 @@ def validate_input_shapefile(input_path: str | Path) -> InputValidationResult:
 
 
 def load_buildings(input_path: str | Path) -> gpd.GeoDataFrame:
-    return gpd.read_file(input_path)
+    gdf = gpd.read_file(input_path)
+
+    if gdf.crs is None:
+        raise ValueError("Input layer has no CRS information (.prj is required).")
+
+    original_crs = gdf.crs
+    gdf.attrs["original_crs"] = original_crs
+    gdf.attrs["input_crs_was_geographic"] = bool(original_crs.is_geographic)
+
+    if original_crs.is_geographic:
+        metric_crs = gdf.estimate_utm_crs() or "EPSG:3857"
+        gdf = gdf.to_crs(metric_crs)
+        gdf.attrs["original_crs"] = original_crs
+        gdf.attrs["input_crs_was_geographic"] = True
+        gdf.attrs["working_metric_crs"] = metric_crs
+
+    return gdf
 
 
 def write_shapefile(gdf: gpd.GeoDataFrame, output_path: str | Path) -> dict[str, Any]:
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    gdf.to_file(out)
+
+    export_gdf = gdf
+    original_crs = gdf.attrs.get("original_crs")
+    if original_crs is not None and gdf.crs is not None and str(original_crs) != str(gdf.crs):
+        export_gdf = gdf.to_crs(original_crs)
+
+    export_gdf.to_file(out)
 
     shapefile_group = []
     for suffix in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
@@ -81,6 +118,8 @@ def write_shapefile(gdf: gpd.GeoDataFrame, output_path: str | Path) -> dict[str,
         "created_files": [str(p) for p in shapefile_group],
         "bundle_zip": str(bundle_path),
         "missing_required_sidecars": missing_required,
+        "output_crs": str(export_gdf.crs) if export_gdf.crs is not None else None,
+        "original_input_crs": str(original_crs) if original_crs is not None else None,
     }
 
 
