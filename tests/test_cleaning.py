@@ -1,7 +1,10 @@
 import geopandas as gpd
 from shapely.geometry import box
 
-from app.cleaning import _is_commercial_or_industrial, commercial_industrial_merge_pass
+from app.cleaning import (
+    _is_commercial_or_industrial,
+    commercial_industrial_merge_pass,
+)
 
 
 def test_is_commercial_or_industrial_accepts_only_explicit_values():
@@ -12,6 +15,12 @@ def test_is_commercial_or_industrial_accepts_only_explicit_values():
     assert not _is_commercial_or_industrial("Industrial Park")
     assert not _is_commercial_or_industrial("")
     assert not _is_commercial_or_industrial(None)
+
+
+def test_is_commercial_or_industrial_handles_spacing_variants_for_offices_retail():
+    assert _is_commercial_or_industrial("Offices,Retail Outlets")
+    assert _is_commercial_or_industrial("Offices,  Retail Outlets")
+    assert _is_commercial_or_industrial("Offices, Retail Outlets")
 
 
 def test_merge_pass_preserves_representative_planning_category_after_merge():
@@ -36,4 +45,5 @@ def test_merge_pass_preserves_representative_planning_category_after_merge():
 
     merged_row = merged.iloc[0]
     assert merged_row["planning_z"] == "Offices, Retail Outlets"
+    assert merged_row["planning_z"] != "Commercial/Industrial"
     assert merged_row["merged_from_ids"] == "geom_0|geom_1"
