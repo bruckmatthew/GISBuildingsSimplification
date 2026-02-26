@@ -461,6 +461,56 @@ def fill_inter_polygon_voids(
     out = out[~out.geometry.is_empty].copy()
     return out, fill_count
 
+def resolve_overlaps(
+    gdf: gpd.GeoDataFrame,
+    overlap_area_threshold: float = 0.5,
+) -> tuple[gpd.GeoDataFrame, int]:
+    """Remove polygon overlaps by subtracting larger geometries from smaller ones."""
+    out = gdf.copy()
+    overlap_fixed_count = 0
+
+    if len(out) <= 1:
+        return out, overlap_fixed_count
+
+    sindex = out.sindex
+    checked: set[tuple[int, int]] = set()
+    updated_geoms = out.geometry.copy()
+
+    for idx, geom in out.geometry.items():
+        for cand in sindex.intersection(geom.bounds):
+            if cand == idx:
+                continue
+
+            key = tuple(sorted((idx, cand)))
+            if key in checked:
+                continue
+            checked.add(key)
+
+            if idx not in updated_geoms.index or cand not in updated_geoms.index:
+                continue
+
+            a = updated_geoms.loc[idx]
+            b = updated_geoms.loc[cand]
+            if a is None or b is None or a.is_empty or b.is_empty:
+                continue
+            if not a.intersects(b):
+                continue
+
+            inter_area = a.intersection(b).area
+            if inter_area <= overlap_area_threshold:
+                continue
+
+            if a.area >= b.area:
+                updated_geoms.loc[cand] = _polygonal_only(make_valid(b.difference(a)))
+            else:
+                updated_geoms.loc[idx] = _polygonal_only(make_valid(a.difference(b)))
+            overlap_fixed_count += 1
+
+    out.geometry = updated_geoms.map(_polygonal_only)
+    out = out[~out.geometry.is_empty].copy()
+    return out, overlap_fixed_count
+
+
 def _longest_shared_boundary(shared_edge) -> float:
     if shared_edge is None or shared_edge.is_empty:
         return 0.0
