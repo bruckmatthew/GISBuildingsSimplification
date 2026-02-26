@@ -30,7 +30,7 @@ def run_pipeline(
         write_shapefile,
     )
     from app.review import run_corner_fix_review
-    from app.rules import recategorize_small_garages, remove_small_industrial_office_retail
+    from app.rules import recategorize_small_garages, remove_small_industrial_utilities
 
     # 1) Load and validate input
     validation = validate_input_shapefile(input_path)
@@ -49,8 +49,8 @@ def run_pipeline(
         garage_reclass=garage_reclass,
     )
 
-    # 5) Remove small Industrial/Utilities and Offices, Retail Outlets buildings
-    gdf, removed_small_target_count = remove_small_industrial_office_retail(gdf, min_area_m2=200.0)
+    # 5) Remove small Industrial/Utilities buildings
+    gdf, removed_small_target_count = remove_small_industrial_utilities(gdf, min_area_m2=200.0)
 
     # 6) Corner-cleaning pass (auto-clean + review queue)
     gdf, needs_review_layer, review_stats = run_corner_fix_review(gdf, basemap=basemap)
@@ -127,7 +127,7 @@ def run_pipeline(
             "qa_summary": qa_summary,
             **topo_stats,
             "recategorized_small_garages": recategorized_count,
-            "removed_small_industrial_office_retail": removed_small_target_count,
+            "removed_small_industrial_utilities": removed_small_target_count,
             "corner_cleaned_features": review_stats["auto_cleaned_count"],
             "corner_needs_review_features": review_stats["needs_review_count"],
             "review_basemap_provider": review_stats["provider"],

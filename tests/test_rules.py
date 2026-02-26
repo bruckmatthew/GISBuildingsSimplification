@@ -1,10 +1,10 @@
 import geopandas as gpd
 from shapely.geometry import box
 
-from app.rules import remove_small_industrial_office_retail
+from app.rules import remove_small_industrial_utilities
 
 
-def test_remove_small_industrial_office_retail_drops_target_classes_below_threshold():
+def test_remove_small_industrial_utilities_drops_target_classes_below_threshold():
     gdf = gpd.GeoDataFrame(
         {
             "planning_z": [
@@ -24,14 +24,14 @@ def test_remove_small_industrial_office_retail_drops_target_classes_below_thresh
         crs="EPSG:3857",
     )
 
-    out, removed_count = remove_small_industrial_office_retail(gdf, min_area_m2=200.0)
+    out, removed_count = remove_small_industrial_utilities(gdf, min_area_m2=200.0)
 
     assert removed_count == 1
     assert len(out) == 3
-    assert set(out["planning_z"].tolist()) == {"Industrial/Utilities", "Offices, Retail Outlets", "Residential"}
+    assert set(out["planning_z"].tolist()) == {"Offices, Retail Outlets", "Industrial/Utilities", "Residential"}
 
 
-def test_remove_small_industrial_office_retail_handles_spacing_and_case():
+def test_remove_small_industrial_utilities_handles_spacing_and_case():
     gdf = gpd.GeoDataFrame(
         {
             "planning_z": [" offices, retail outlets ", "INDUSTRIAL/UTILITIES", "Residential"],
@@ -41,8 +41,8 @@ def test_remove_small_industrial_office_retail_handles_spacing_and_case():
         crs="EPSG:3857",
     )
 
-    out, removed_count = remove_small_industrial_office_retail(gdf, min_area_m2=150.0)
+    out, removed_count = remove_small_industrial_utilities(gdf, min_area_m2=150.0)
 
-    assert removed_count == 2
-    assert len(out) == 1
-    assert out.iloc[0]["planning_z"] == "Residential"
+    assert removed_count == 1
+    assert len(out) == 2
+    assert set(out["planning_z"].tolist()) == {" offices, retail outlets ", "Residential"}
