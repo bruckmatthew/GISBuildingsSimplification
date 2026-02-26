@@ -6,7 +6,7 @@ from collections import defaultdict
 import pandas as pd
 import geopandas as gpd
 from shapely import make_valid, normalize, set_precision
-from shapely.geometry import MultiPolygon, Polygon
+from shapely.geometry import GeometryCollection, MultiPolygon, Polygon
 from shapely.ops import unary_union
 
 
@@ -92,7 +92,22 @@ def _polygon_parts(geom) -> list[Polygon]:
         return [geom]
     if isinstance(geom, MultiPolygon):
         return [part for part in geom.geoms if part is not None and not part.is_empty]
+    if isinstance(geom, GeometryCollection):
+        parts = []
+        for sub_geom in geom.geoms:
+            parts.extend(_polygon_parts(sub_geom))
+        return parts
     return []
+
+
+def _polygonal_or_original(geom):
+    """Return polygonal components when available, otherwise return original geometry."""
+    parts = _polygon_parts(geom)
+    if not parts:
+        return geom
+    if len(parts) == 1:
+        return parts[0]
+    return MultiPolygon(parts)
 
 
 def _minimum_width_estimate(geom) -> float:
@@ -126,8 +141,8 @@ def _is_small_narrow_removed_piece(piece, width_threshold_m: float, area_thresho
 
 def remove_narrow_ledges(
     gdf: gpd.GeoDataFrame,
-    width_threshold_m: float = 1.0,
-    area_threshold_m2: float = 8.0,
+    width_threshold_m: float = 2.5,
+    area_threshold_m2: float = 50.0,
 ) -> tuple[gpd.GeoDataFrame, dict[str, float]]:
     """Remove narrow protrusions via morphological opening when loss is controlled."""
     out = gdf.copy()
@@ -137,54 +152,64 @@ def remove_narrow_ledges(
     ledge_removed_area_total = 0.0
     ledge_skipped_count = 0
 
-    distance = max(width_threshold_m / 2.0, 0.01)
-    max_loss_ratio = 0.2
+    base_distance = max(width_threshold_m / 2.0, 0.01)
+    opening_distances = (base_distance * 0.75, base_distance, base_distance * 1.25)
+    max_loss_ratio = 0.25
 
     for geom in out.geometry:
         if geom is None or geom.is_empty:
             cleaned_geoms.append(geom)
             continue
 
-        valid_geom = make_valid(geom)
+        valid_geom = _polygonal_or_original(make_valid(geom))
         if valid_geom.is_empty:
             cleaned_geoms.append(geom)
             continue
 
         original_area = float(valid_geom.area)
-        opened = valid_geom.buffer(-distance, join_style=2).buffer(distance, join_style=2)
-        opened = make_valid(opened)
+        current_geom = valid_geom
+        removed_area_accum = 0.0
 
-        if opened.is_empty:
-            cleaned_geoms.append(valid_geom)
-            ledge_skipped_count += 1
-            continue
+        for distance in opening_distances:
+            opened = make_valid(current_geom.buffer(-distance, join_style=2).buffer(distance, join_style=2))
+            opened = _polygonal_or_original(opened)
+            if opened.is_empty:
+                continue
 
-        removed = make_valid(valid_geom.difference(opened))
-        removed_area = float(removed.area) if not removed.is_empty else 0.0
-        if removed_area <= 0.0:
-            cleaned_geoms.append(valid_geom)
-            continue
+            removed = make_valid(current_geom.difference(opened))
+            removed = _polygonal_or_original(removed)
+            removed_area = float(removed.area) if not removed.is_empty else 0.0
+            if removed_area <= 0.0:
+                continue
 
-        cleaned = make_valid(valid_geom.difference(removed))
-        if cleaned.is_empty:
-            cleaned_geoms.append(valid_geom)
-            ledge_skipped_count += 1
-            continue
+            area_loss_ratio = removed_area / original_area if original_area > 0 else 0.0
+            if area_loss_ratio > max_loss_ratio:
+                continue
 
-        area_loss_ratio = removed_area / original_area if original_area > 0 else 0.0
-        should_replace = _is_small_narrow_removed_piece(
-            removed,
-            width_threshold_m=width_threshold_m,
-            area_threshold_m2=area_threshold_m2,
-        ) and area_loss_ratio <= max_loss_ratio
+            should_replace = _is_small_narrow_removed_piece(
+                removed,
+                width_threshold_m=width_threshold_m,
+                area_threshold_m2=area_threshold_m2,
+            )
+            if not should_replace:
+                continue
 
-        if should_replace:
-            cleaned_geoms.append(cleaned)
+            candidate = _polygonal_or_original(make_valid(current_geom.difference(removed)))
+            if candidate.is_empty:
+                continue
+
+            current_geom = candidate
+            removed_area_accum += removed_area
+
+        cumulative_loss = removed_area_accum / original_area if original_area > 0 else 0.0
+        if removed_area_accum > 0 and cumulative_loss <= 0.35:
+            cleaned_geoms.append(current_geom)
             ledge_fixed_count += 1
-            ledge_removed_area_total += removed_area
+            ledge_removed_area_total += removed_area_accum
         else:
             cleaned_geoms.append(valid_geom)
-            ledge_skipped_count += 1
+            if removed_area_accum > 0:
+                ledge_skipped_count += 1
 
     out.geometry = cleaned_geoms
     return out, {

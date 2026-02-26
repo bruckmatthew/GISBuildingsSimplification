@@ -155,3 +155,23 @@ def test_remove_narrow_ledges_handles_multipolygon_parts():
 
     assert stats["ledge_fixed_count"] == 1
     assert out.geometry.iloc[0].area < multi.area
+
+
+def test_remove_narrow_ledges_cleans_multiple_small_step_ledges():
+    main = box(0, 0, 20, 20)
+    ledges = [
+        box(20, 3, 21.8, 4.8),
+        box(20, 8, 22.0, 9.7),
+        box(20, 13, 21.6, 14.7),
+    ]
+    geom = main
+    for ledge in ledges:
+        geom = geom.union(ledge)
+
+    gdf = gpd.GeoDataFrame({"geometry": [geom]}, geometry="geometry", crs="EPSG:3857")
+
+    out, stats = remove_narrow_ledges(gdf)
+
+    assert stats["ledge_fixed_count"] == 1
+    assert out.geometry.iloc[0].area < geom.area
+    assert out.geometry.iloc[0].area > main.area - 0.5
