@@ -189,16 +189,29 @@ def _longest_shared_boundary(shared_edge) -> float:
     return float(shared_edge.length)
 
 
+def _normalize_planning_z_text(value: object) -> str:
+    """Normalize planning_z text for strict-yet-robust category matching."""
+    text = str(value).replace("\u00a0", " ").strip().lower()
+    text = " ".join(text.split())
+    text = text.replace(", ", ",").replace(" ,", ",")
+    text = text.replace("/ ", "/").replace(" /", "/")
+    return text
+
+
 def _is_commercial_or_industrial(value: object) -> bool:
+    """Return True only for explicit planning categories targeted by the merge pass."""
     if value is None:
         return False
 
-    text = str(value).strip().lower()
+    text = _normalize_planning_z_text(value)
     if not text:
         return False
 
-    # Handles class values like "Commercial/Business" and "Industrial/Utilities"
-    return text.startswith("commercial") or text.startswith("industrial")
+    accepted = {
+        "offices,retail outlets",
+        "industrial/utilities",
+    }
+    return text in accepted
 
 
 def _blocked_by_barriers(
@@ -224,6 +237,11 @@ def commercial_industrial_merge_pass(
     parcels_gdf: gpd.GeoDataFrame | None = None,
     min_shared_edge_m: float = 1.0,
 ) -> gpd.GeoDataFrame:
+    """Merge adjacent eligible target classes while preserving original planning categories.
+
+    This pass only groups adjacent features in accepted planning classes and never creates
+    synthetic planning category values.
+    """
     out = gdf.copy()
     use_col = "planning_z" if "planning_z" in out.columns else None
     if use_col is None:
@@ -297,6 +315,7 @@ def commercial_industrial_merge_pass(
 
         if len(cluster) == 1:
             row = rep.drop(labels=["_area_rank"], errors="ignore").to_dict()
+            row[use_col] = rep[use_col]
             row["merge_cluster_id"] = cluster_id
             row["merged_from_ids"] = rep["source_geom_id"]
             merged_rows.append(row)
@@ -315,7 +334,7 @@ def commercial_industrial_merge_pass(
         source_ids = sorted(cluster["source_geom_id"].astype(str).tolist())
         row = rep.drop(labels=["_area_rank"], errors="ignore").to_dict()
         row["geometry"] = merged_geom
-        row[use_col] = "Commercial/Industrial"
+        row[use_col] = rep[use_col]
         row["merge_pass"] = "merged"
         row["merge_cluster_id"] = cluster_id
         row["merged_from_ids"] = "|".join(source_ids)
