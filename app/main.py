@@ -48,11 +48,12 @@ def run_pipeline(
     # 5) Corner-cleaning pass (auto-clean + review queue)
     gdf, needs_review_layer, review_stats = run_corner_fix_review(gdf, basemap=basemap)
 
-    # 6) Commercial/industrial merge pass
-    before_merge_count = len(gdf)
+    # 6) Adjacent target merge pass (no recategorization)
+    before_adjacent_target_merge_count = len(gdf)
     gdf = commercial_industrial_merge_pass(gdf)
-    after_merge_count = len(gdf)
-    merge_log = gdf.attrs.get("merge_log", [])
+    after_adjacent_target_merge_count = len(gdf)
+    adjacent_target_merge_log = gdf.attrs.get("merge_log", [])
+    adjacent_target_merge_stats = gdf.attrs.get("merge_stats", {})
 
     # 7) Final hole cleanup after all geometry-modifying passes
     gdf, post_merge_hole_stats = strip_small_holes(gdf)
@@ -93,10 +94,15 @@ def run_pipeline(
             "corner_cleaned_features": review_stats["auto_cleaned_count"],
             "corner_needs_review_features": review_stats["needs_review_count"],
             "review_basemap_provider": review_stats["provider"],
-            "feature_count_before_merge": before_merge_count,
-            "feature_count_after_merge": after_merge_count,
-            "merge_log_count": len(merge_log),
-            "merge_log": merge_log,
+            "feature_count_before_adjacent_target_merge": before_adjacent_target_merge_count,
+            "feature_count_after_adjacent_target_merge": after_adjacent_target_merge_count,
+            "adjacent_target_merge_log_count": len(adjacent_target_merge_log),
+            "adjacent_target_merge_log": adjacent_target_merge_log,
+            "adjacent_target_target_candidate_count": adjacent_target_merge_stats.get("target_candidate_count", 0),
+            "adjacent_target_merged_cluster_count": adjacent_target_merge_stats.get("merged_cluster_count", 0),
+            "adjacent_target_merged_feature_count": adjacent_target_merge_stats.get("merged_feature_count", 0),
+            "adjacent_target_accepted_tokens": adjacent_target_merge_stats.get("accepted_target_tokens", []),
+            "adjacent_target_observed_top_tokens": adjacent_target_merge_stats.get("observed_top_planning_tokens", {}),
         },
         "export": export_info,
     }
