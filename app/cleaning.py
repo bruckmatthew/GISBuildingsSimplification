@@ -189,16 +189,29 @@ def _longest_shared_boundary(shared_edge) -> float:
     return float(shared_edge.length)
 
 
+def _normalize_planning_z_text(value: object) -> str:
+    """Normalize planning_z text for strict-yet-robust category matching."""
+    text = str(value).replace("\u00a0", " ").strip().lower()
+    text = " ".join(text.split())
+    text = text.replace(", ", ",").replace(" ,", ",")
+    text = text.replace("/ ", "/").replace(" /", "/")
+    return text
+
+
 def _is_commercial_or_industrial(value: object) -> bool:
+    """Return True only for explicit planning categories targeted by the merge pass."""
     if value is None:
         return False
 
-    text = str(value).strip().lower()
+    text = _normalize_planning_z_text(value)
     if not text:
         return False
 
-    # Handles class values like "Commercial/Business" and "Industrial/Utilities"
-    return text.startswith("commercial") or text.startswith("industrial")
+    accepted = {
+        "offices,retail outlets",
+        "industrial/utilities",
+    }
+    return text in accepted
 
 
 def _blocked_by_barriers(
@@ -213,9 +226,17 @@ def _blocked_by_barriers(
 
 
 def _pick_representative_row(cluster: gpd.GeoDataFrame, source_id_col: str) -> pd.Series:
-    areas = cluster.geometry.area
+    areas = cluster.geometry.map(lambda geom: 0.0 if geom is None else float(geom.area))
     ranked = cluster.assign(_area_rank=areas).sort_values(["_area_rank", source_id_col], ascending=[False, True])
     return ranked.iloc[0]
+
+
+def _effective_min_shared_edge(gdf: gpd.GeoDataFrame, min_shared_edge_m: float) -> float:
+    """Use the caller threshold for projected data and relax it for geographic CRS."""
+    crs = getattr(gdf, "crs", None)
+    if crs is not None and getattr(crs, "is_geographic", False):
+        return 0.0
+    return float(min_shared_edge_m)
 
 
 def commercial_industrial_merge_pass(
@@ -224,6 +245,12 @@ def commercial_industrial_merge_pass(
     parcels_gdf: gpd.GeoDataFrame | None = None,
     min_shared_edge_m: float = 1.0,
 ) -> gpd.GeoDataFrame:
+    """Merge adjacent eligible target classes while preserving original planning categories.
+
+    This pass only groups adjacent features in accepted planning classes and never creates
+    synthetic planning category values. For geographic CRS inputs (degrees), the minimum
+    shared-edge threshold is relaxed so adjacency is still detected.
+    """
     out = gdf.copy()
     use_col = "planning_z" if "planning_z" in out.columns else None
     if use_col is None:
@@ -248,6 +275,8 @@ def commercial_industrial_merge_pass(
     if parcels_gdf is not None and not parcels_gdf.empty:
         barrier_geoms.extend([geom for geom in parcels_gdf.geometry if geom is not None and not geom.is_empty])
     barriers_union = unary_union(barrier_geoms) if barrier_geoms else None
+
+    min_shared_edge = _effective_min_shared_edge(out, min_shared_edge_m)
 
     sindex = target.sindex
     parent = {idx: idx for idx in target.index}
@@ -275,7 +304,7 @@ def commercial_industrial_merge_pass(
                 continue
             shared_edge = geom.boundary.intersection(other.boundary)
             shared_len = _longest_shared_boundary(shared_edge)
-            if shared_len < min_shared_edge_m:
+            if shared_len < min_shared_edge:
                 continue
             if _blocked_by_barriers(shared_edge, barriers_union):
                 continue
@@ -297,6 +326,7 @@ def commercial_industrial_merge_pass(
 
         if len(cluster) == 1:
             row = rep.drop(labels=["_area_rank"], errors="ignore").to_dict()
+            row[use_col] = rep[use_col]
             row["merge_cluster_id"] = cluster_id
             row["merged_from_ids"] = rep["source_geom_id"]
             merged_rows.append(row)
@@ -315,7 +345,7 @@ def commercial_industrial_merge_pass(
         source_ids = sorted(cluster["source_geom_id"].astype(str).tolist())
         row = rep.drop(labels=["_area_rank"], errors="ignore").to_dict()
         row["geometry"] = merged_geom
-        row[use_col] = "Commercial/Industrial"
+        row[use_col] = rep[use_col]
         row["merge_pass"] = "merged"
         row["merge_cluster_id"] = cluster_id
         row["merged_from_ids"] = "|".join(source_ids)
