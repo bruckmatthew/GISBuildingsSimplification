@@ -144,28 +144,10 @@ def _boundary_complexity(geometry) -> float:
     return float(perimeter / math.sqrt(area))
 
 
+def _vertex_count(geometry) -> int:
+    parts = _polygon_parts(geometry)
+    return sum(max(0, len(list(part.exterior.coords)) - 1) for part in parts)
 
-
-def _hull_deficit_ratio(geometry) -> float:
-    if geometry is None or geometry.is_empty:
-        return 0.0
-    area = geometry.area
-    if area <= 0:
-        return 0.0
-    hull_area = geometry.convex_hull.area
-    if hull_area <= 0:
-        return 0.0
-    return float(max(0.0, hull_area - area) / area)
-
-
-def _candidate_distances(min_distance: float, max_distance: float, steps: int = 6) -> list[float]:
-    if max_distance <= min_distance:
-        return [min_distance]
-    distances: list[float] = []
-    for i in range(steps):
-        ratio = i / max(steps - 1, 1)
-        distances.append(min_distance + ((max_distance - min_distance) * ratio))
-    return distances
 
 def _auto_corner_fix(
     geometry,
@@ -173,7 +155,7 @@ def _auto_corner_fix(
     closing_distance: float | None = None,
     max_closing_area_delta_ratio: float = 0.02,
 ):
-    """Remove tiny spikes/slivers while keeping geometry topology-safe."""
+    """Remove tiny spikes/slivers and narrow inward notches while preserving hard corners."""
     if geometry is None or geometry.is_empty:
         return geometry
 
@@ -185,32 +167,49 @@ def _auto_corner_fix(
     if cleaned_area <= 0:
         return cleaned
 
-    scale = max(math.sqrt(cleaned_area), tolerance, 0.001)
+    minx, miny, maxx, maxy = cleaned.bounds
+    min_dim = max(min(maxx - minx, maxy - miny), 0.001)
+
     if closing_distance is None:
-        min_distance = max(tolerance * 1.5, scale * 0.006, 0.001)
-        max_distance = max(min_distance, scale * 0.12)
-        distances = _candidate_distances(min_distance, max_distance)
+        candidate_distances = [
+            max(tolerance * 1.25, min_dim * 0.008, 0.001),
+            max(tolerance * 2.0, min_dim * 0.015, 0.001),
+            max(tolerance * 3.0, min_dim * 0.03, 0.001),
+        ]
     else:
-        distances = [max(closing_distance, 0.001)]
+        candidate_distances = [max(closing_distance, 0.001)]
+
+    before_vertices = _vertex_count(cleaned)
+    before_compactness = _compactness(cleaned)
+    before_complexity = _boundary_complexity(cleaned)
 
     best_candidate = cleaned
     best_score = 0.0
 
-    for distance in distances:
-        closed_candidate = cleaned.buffer(distance).buffer(-distance).buffer(0)
+    for distance in candidate_distances:
+        closed_candidate = (
+            cleaned.buffer(distance, join_style=2, cap_style=2, quad_segs=1)
+            .buffer(-distance, join_style=2, cap_style=2, quad_segs=1)
+            .buffer(0)
+        )
         if closed_candidate is None or closed_candidate.is_empty:
             continue
 
+        closed_candidate = closed_candidate.simplify(tolerance=tolerance * 0.4, preserve_topology=True).buffer(0)
+
         closed_area = closed_candidate.area
-        area_delta_ratio = abs(closed_area - cleaned_area) / cleaned_area if cleaned_area > 0 else 1.0
+        area_delta_ratio = abs(closed_area - cleaned_area) / cleaned_area
         if area_delta_ratio > max_closing_area_delta_ratio:
             continue
 
-        compactness_gain = max(0.0, _compactness(closed_candidate) - _compactness(cleaned))
-        complexity_reduction = max(0.0, _boundary_complexity(cleaned) - _boundary_complexity(closed_candidate))
-        hull_deficit_reduction = max(0.0, _hull_deficit_ratio(cleaned) - _hull_deficit_ratio(closed_candidate))
+        after_vertices = _vertex_count(closed_candidate)
+        if after_vertices > (before_vertices + 12):
+            continue
 
-        score = compactness_gain + (0.75 * complexity_reduction) + (1.5 * hull_deficit_reduction)
+        compactness_gain = max(0.0, _compactness(closed_candidate) - before_compactness)
+        complexity_reduction = max(0.0, before_complexity - _boundary_complexity(closed_candidate))
+        score = compactness_gain + (0.9 * complexity_reduction)
+
         if score > best_score:
             best_score = score
             best_candidate = closed_candidate
@@ -251,7 +250,6 @@ def run_corner_fix_review(
         before_area = geom.area
         before_compactness = _compactness(geom)
         before_complexity = _boundary_complexity(geom)
-        before_hull_deficit = _hull_deficit_ratio(geom)
 
         candidate = _auto_corner_fix(
             geom,
@@ -264,16 +262,13 @@ def run_corner_fix_review(
         right_angle_confidence = _right_angle_confidence_geometry(candidate)
         after_compactness = _compactness(candidate)
         after_complexity = _boundary_complexity(candidate)
-        after_hull_deficit = _hull_deficit_ratio(candidate)
 
         compactness_gain = max(0.0, after_compactness - before_compactness)
         complexity_reduction = max(0.0, before_complexity - after_complexity)
-        hull_deficit_reduction = max(0.0, before_hull_deficit - after_hull_deficit)
 
         notch_score = (
-            (0.45 * min(compactness_gain / 0.006, 1.0))
-            + (0.25 * min(complexity_reduction / 0.02, 1.0))
-            + (0.30 * min(hull_deficit_reduction / 0.04, 1.0))
+            (0.60 * min(compactness_gain / 0.006, 1.0))
+            + (0.40 * min(complexity_reduction / 0.02, 1.0))
         )
         notch_cleaned = notch_score >= 0.55
         confidence = max(right_angle_confidence, notch_score)
@@ -286,8 +281,7 @@ def run_corner_fix_review(
             out.at[idx, "review_notes"] = (
                 f"Auto cleaned ({notch_note}); area_delta_ratio={area_delta_ratio:.4f}; "
                 f"confidence={confidence:.2f}; right_angle_confidence={right_angle_confidence:.2f}; "
-                f"compactness_gain={compactness_gain:.4f}; complexity_reduction={complexity_reduction:.4f}; "
-                f"hull_deficit_reduction={hull_deficit_reduction:.4f}"
+                f"compactness_gain={compactness_gain:.4f}; complexity_reduction={complexity_reduction:.4f}"
             )
             auto_fixed_count += 1
         else:
@@ -298,7 +292,7 @@ def run_corner_fix_review(
             out.at[idx, "review_notes"] = (
                 f"{reason}; area_delta_ratio={area_delta_ratio:.4f}; confidence={confidence:.2f}; "
                 f"right_angle_confidence={right_angle_confidence:.2f}; compactness_gain={compactness_gain:.4f}; "
-                f"complexity_reduction={complexity_reduction:.4f}; hull_deficit_reduction={hull_deficit_reduction:.4f}"
+                f"complexity_reduction={complexity_reduction:.4f}"
             )
             needs_review_count += 1
 

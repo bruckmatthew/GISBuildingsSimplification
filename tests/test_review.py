@@ -67,15 +67,17 @@ def test_corner_fix_evaluates_multipolygon_confidence_for_auto_clean():
     assert "confidence=" in out.loc[0, "review_notes"]
 
 
-def test_corner_fix_default_tolerance_cleans_scaled_triangular_notch():
+def test_corner_fix_default_tolerance_cleans_scaled_narrow_indent_without_vertex_explosion():
+    # Large footprint with a very narrow inward slit artifact.
     geom = Polygon(
         [
             (0, 0),
-            (100, 0),
-            (100, 100),
-            (60, 100),
-            (55, 80),
-            (50, 100),
+            (120, 0),
+            (120, 100),
+            (62, 100),
+            (62, 65),
+            (58, 65),
+            (58, 100),
             (0, 100),
             (0, 0),
         ]
@@ -90,11 +92,15 @@ def test_corner_fix_default_tolerance_cleans_scaled_triangular_notch():
     )
 
     cleaned = out.geometry.iloc[0]
-    notch_region = Polygon([(50.0, 80.0), (60.0, 80.0), (60.0, 100.0), (50.0, 100.0)])
+    indent_region = Polygon([(58.0, 65.0), (62.0, 65.0), (62.0, 100.0), (58.0, 100.0)])
 
     assert stats["auto_cleaned_count"] == 1
     assert len(needs_review) == 0
     assert out.loc[0, "review_action"] == "auto_cleaned"
     assert "notch cleaned" in out.loc[0, "review_notes"]
     assert abs(cleaned.area - geom.area) / geom.area < 0.02
-    assert cleaned.intersection(notch_region).area > 80.0
+    assert cleaned.intersection(indent_region).area > 130.0
+
+    original_vertices = len(list(geom.exterior.coords)) - 1
+    cleaned_vertices = len(list(cleaned.exterior.coords)) - 1
+    assert cleaned_vertices <= original_vertices + 12
