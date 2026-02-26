@@ -13,6 +13,7 @@ def run_pipeline(
 ) -> dict[str, Any]:
     from app.cleaning import (
         commercial_industrial_merge_pass,
+        fill_narrow_indents,
         remove_narrow_ledges,
         simplify_geometry,
         strip_small_holes,
@@ -56,10 +57,13 @@ def run_pipeline(
     adjacent_target_merge_log = gdf.attrs.get("merge_log", [])
     adjacent_target_merge_stats = gdf.attrs.get("merge_stats", {})
 
-    # 7) Remove narrow ledges after topology + merge
+    # 7) Fill narrow inward indents after topology + merge
+    gdf, indent_stats = fill_narrow_indents(gdf)
+
+    # 8) Remove narrow ledges after indent fill
     gdf, ledge_stats = remove_narrow_ledges(gdf)
 
-    # 8) Final hole cleanup after all geometry-modifying passes
+    # 9) Final hole cleanup after all geometry-modifying passes
     gdf, post_merge_hole_stats = strip_small_holes(gdf)
     topo_stats["holes_removed_count"] += post_merge_hole_stats["holes_removed_count"]
     topo_stats["holes_preserved_count"] += post_merge_hole_stats["holes_preserved_count"]
@@ -69,8 +73,11 @@ def run_pipeline(
     topo_stats["ledge_fixed_count"] = ledge_stats["ledge_fixed_count"]
     topo_stats["ledge_removed_area_total"] = ledge_stats["ledge_removed_area_total"]
     topo_stats["ledge_skipped_count"] = ledge_stats["ledge_skipped_count"]
+    topo_stats["indent_fixed_count"] = indent_stats["indent_fixed_count"]
+    topo_stats["indent_filled_area_total"] = indent_stats["indent_filled_area_total"]
+    topo_stats["indent_skipped_count"] = indent_stats["indent_skipped_count"]
 
-    # 9) Export outputs and QA report
+    # 10) Export outputs and QA report
     export_info = write_shapefile(gdf, output_path)
     review_export = write_review_layer(needs_review_layer, output_path)
     if review_export is not None:
@@ -82,6 +89,7 @@ def run_pipeline(
         "overlaps_fixed": topo_stats["overlap_fixed_count"],
         "holes_removed": topo_stats["holes_removed_count"],
         "holes_preserved": topo_stats["holes_preserved_count"],
+        "indents_fixed": topo_stats["indent_fixed_count"],
         "ledges_fixed": topo_stats["ledge_fixed_count"],
     }
 

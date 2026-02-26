@@ -194,6 +194,70 @@ def remove_narrow_ledges(
     }
 
 
+def fill_narrow_indents(
+    gdf: gpd.GeoDataFrame,
+    width_threshold_m: float = 1.2,
+    area_threshold_m2: float = 10.0,
+) -> tuple[gpd.GeoDataFrame, dict[str, float]]:
+    """Fill narrow inward notches via morphological closing when gain is controlled."""
+    out = gdf.copy()
+    cleaned_geoms = []
+
+    indent_fixed_count = 0
+    indent_filled_area_total = 0.0
+    indent_skipped_count = 0
+
+    distance = max(width_threshold_m / 2.0, 0.01)
+    max_gain_ratio = 0.12
+
+    for geom in out.geometry:
+        if geom is None or geom.is_empty:
+            cleaned_geoms.append(geom)
+            continue
+
+        valid_geom = make_valid(geom)
+        if valid_geom.is_empty:
+            cleaned_geoms.append(geom)
+            continue
+
+        original_area = float(valid_geom.area)
+        closed = valid_geom.buffer(distance, join_style=2).buffer(-distance, join_style=2)
+        closed = make_valid(closed)
+
+        if closed.is_empty:
+            cleaned_geoms.append(valid_geom)
+            indent_skipped_count += 1
+            continue
+
+        added = make_valid(closed.difference(valid_geom))
+        added_area = float(added.area) if not added.is_empty else 0.0
+        if added_area <= 0.0:
+            cleaned_geoms.append(valid_geom)
+            continue
+
+        area_gain_ratio = added_area / original_area if original_area > 0 else 0.0
+        should_replace = _is_small_narrow_removed_piece(
+            added,
+            width_threshold_m=width_threshold_m,
+            area_threshold_m2=area_threshold_m2,
+        ) and area_gain_ratio <= max_gain_ratio
+
+        if should_replace:
+            cleaned_geoms.append(closed)
+            indent_fixed_count += 1
+            indent_filled_area_total += added_area
+        else:
+            cleaned_geoms.append(valid_geom)
+            indent_skipped_count += 1
+
+    out.geometry = cleaned_geoms
+    return out, {
+        "indent_fixed_count": int(indent_fixed_count),
+        "indent_filled_area_total": float(indent_filled_area_total),
+        "indent_skipped_count": int(indent_skipped_count),
+    }
+
+
 def simplify_geometry(
     gdf: gpd.GeoDataFrame,
     basemap: str,
