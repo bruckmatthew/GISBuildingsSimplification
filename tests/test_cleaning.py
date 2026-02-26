@@ -270,3 +270,22 @@ def test_topology_qa_and_fixes_resolves_overlaps_after_multiple_passes():
     assert stats["overlap_fixed_count"] == 2
     assert len(out) == 1
     assert out.geometry.iloc[0].equals_exact(box(0, 0, 10, 10), tolerance=1e-6)
+
+
+def test_resolve_overlaps_strict_threshold_removes_tiny_overlap():
+    gdf = gpd.GeoDataFrame(
+        {
+            "geometry": [
+                box(0, 0, 10, 10),
+                box(9.95, 9.95, 10.05, 10.05),
+            ],
+        },
+        geometry="geometry",
+        crs="EPSG:3857",
+    )
+
+    out, fixed_count = resolve_overlaps(gdf, overlap_area_threshold=0.0)
+
+    assert fixed_count == 1
+    assert len(out) == 2
+    assert out.geometry.iloc[0].intersection(out.geometry.iloc[1]).area == 0.0
