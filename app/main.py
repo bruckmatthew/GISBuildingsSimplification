@@ -57,7 +57,7 @@ def run_pipeline(
     adjacent_target_merge_stats = gdf.attrs.get("merge_stats", {})
 
     # 7) Remove narrow ledges after topology + merge
-    gdf, ledge_stats = remove_narrow_ledges(gdf, width_threshold_m=2.5, area_threshold_m2=50.0)
+    gdf, ledge_stats = remove_narrow_ledges(gdf)
 
     # 8) Final hole cleanup after all geometry-modifying passes
     gdf, post_merge_hole_stats = strip_small_holes(gdf)
