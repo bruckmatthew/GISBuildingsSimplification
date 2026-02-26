@@ -59,7 +59,7 @@ def recategorize_small_garages(
 
 def remove_small_industrial_office_retail(
     gdf: gpd.GeoDataFrame,
-    min_area_m2: float = 500.0,
+    min_area_m2: float = 200.0,
 ) -> tuple[gpd.GeoDataFrame, int]:
     """Drop small Industrial/Utilities and Offices, Retail Outlets features."""
     out = gdf.copy()

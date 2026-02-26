@@ -50,7 +50,7 @@ def run_pipeline(
     )
 
     # 5) Remove small Industrial/Utilities and Offices, Retail Outlets buildings
-    gdf, removed_small_target_count = remove_small_industrial_office_retail(gdf, min_area_m2=500.0)
+    gdf, removed_small_target_count = remove_small_industrial_office_retail(gdf, min_area_m2=200.0)
 
     # 6) Corner-cleaning pass (auto-clean + review queue)
     gdf, needs_review_layer, review_stats = run_corner_fix_review(gdf, basemap=basemap)

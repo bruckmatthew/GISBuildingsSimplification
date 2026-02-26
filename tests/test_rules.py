@@ -24,11 +24,11 @@ def test_remove_small_industrial_office_retail_drops_target_classes_below_thresh
         crs="EPSG:3857",
     )
 
-    out, removed_count = remove_small_industrial_office_retail(gdf, min_area_m2=500.0)
+    out, removed_count = remove_small_industrial_office_retail(gdf, min_area_m2=200.0)
 
-    assert removed_count == 2
-    assert len(out) == 2
-    assert set(out["planning_z"].tolist()) == {"Industrial/Utilities", "Residential"}
+    assert removed_count == 1
+    assert len(out) == 3
+    assert set(out["planning_z"].tolist()) == {"Industrial/Utilities", "Offices, Retail Outlets", "Residential"}
 
 
 def test_remove_small_industrial_office_retail_handles_spacing_and_case():
