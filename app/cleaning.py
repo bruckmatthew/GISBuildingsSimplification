@@ -190,6 +190,7 @@ def _longest_shared_boundary(shared_edge) -> float:
 
 
 def _is_commercial_or_industrial(value: object) -> bool:
+    """Return True only for explicit planning categories targeted by the merge pass."""
     if value is None:
         return False
 
@@ -197,8 +198,11 @@ def _is_commercial_or_industrial(value: object) -> bool:
     if not text:
         return False
 
-    # Handles class values like "Commercial/Business" and "Industrial/Utilities"
-    return text.startswith("commercial") or text.startswith("industrial")
+    accepted = {
+        "offices, retail outlets",
+        "industrial/utilities",
+    }
+    return text in accepted
 
 
 def _blocked_by_barriers(
@@ -224,6 +228,11 @@ def commercial_industrial_merge_pass(
     parcels_gdf: gpd.GeoDataFrame | None = None,
     min_shared_edge_m: float = 1.0,
 ) -> gpd.GeoDataFrame:
+    """Merge adjacent eligible target classes while preserving original planning categories.
+
+    This pass only groups adjacent features in accepted planning classes and never creates
+    synthetic planning category values.
+    """
     out = gdf.copy()
     use_col = "planning_z" if "planning_z" in out.columns else None
     if use_col is None:
@@ -315,7 +324,6 @@ def commercial_industrial_merge_pass(
         source_ids = sorted(cluster["source_geom_id"].astype(str).tolist())
         row = rep.drop(labels=["_area_rank"], errors="ignore").to_dict()
         row["geometry"] = merged_geom
-        row[use_col] = "Commercial/Industrial"
         row["merge_pass"] = "merged"
         row["merge_cluster_id"] = cluster_id
         row["merged_from_ids"] = "|".join(source_ids)
