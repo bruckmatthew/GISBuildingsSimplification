@@ -47,3 +47,26 @@ def test_merge_pass_preserves_representative_planning_category_after_merge():
     assert merged_row["planning_z"] == "Offices, Retail Outlets"
     assert merged_row["planning_z"] != "Commercial/Industrial"
     assert merged_row["merged_from_ids"] == "geom_0|geom_1"
+
+
+def test_merge_pass_merges_adjacent_offices_retail_features():
+    gdf = gpd.GeoDataFrame(
+        {
+            "planning_z": ["Offices, Retail Outlets", "Offices, Retail Outlets", "Residential"],
+            "geometry": [
+                box(0, 0, 1, 1),
+                box(1, 0, 2, 1),
+                box(5, 5, 6, 6),
+            ],
+        },
+        geometry="geometry",
+        crs="EPSG:3857",
+    )
+
+    out = commercial_industrial_merge_pass(gdf, min_shared_edge_m=0.5)
+
+    merged = out[out["merge_pass"] == "merged"]
+    assert len(merged) == 1
+    merged_row = merged.iloc[0]
+    assert merged_row["planning_z"] == "Offices, Retail Outlets"
+    assert merged_row["merged_from_ids"] == "geom_0|geom_1"
