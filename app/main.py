@@ -13,6 +13,7 @@ def run_pipeline(
 ) -> dict[str, Any]:
     from app.cleaning import (
         commercial_industrial_merge_pass,
+        remove_narrow_ledges,
         simplify_geometry,
         strip_small_holes,
         topology_qa_and_fixes,
@@ -55,14 +56,21 @@ def run_pipeline(
     adjacent_target_merge_log = gdf.attrs.get("merge_log", [])
     adjacent_target_merge_stats = gdf.attrs.get("merge_stats", {})
 
-    # 7) Final hole cleanup after all geometry-modifying passes
+    # 7) Remove narrow ledges after topology + merge
+    gdf, ledge_stats = remove_narrow_ledges(gdf, width_threshold_m=2.5, area_threshold_m2=50.0)
+
+    # 8) Final hole cleanup after all geometry-modifying passes
     gdf, post_merge_hole_stats = strip_small_holes(gdf)
     topo_stats["holes_removed_count"] += post_merge_hole_stats["holes_removed_count"]
     topo_stats["holes_preserved_count"] += post_merge_hole_stats["holes_preserved_count"]
     topo_stats["post_merge_holes_removed_count"] = post_merge_hole_stats["holes_removed_count"]
     topo_stats["post_merge_holes_preserved_count"] = post_merge_hole_stats["holes_preserved_count"]
 
-    # 8) Export outputs and QA report
+    topo_stats["ledge_fixed_count"] = ledge_stats["ledge_fixed_count"]
+    topo_stats["ledge_removed_area_total"] = ledge_stats["ledge_removed_area_total"]
+    topo_stats["ledge_skipped_count"] = ledge_stats["ledge_skipped_count"]
+
+    # 9) Export outputs and QA report
     export_info = write_shapefile(gdf, output_path)
     review_export = write_review_layer(needs_review_layer, output_path)
     if review_export is not None:
@@ -74,6 +82,7 @@ def run_pipeline(
         "overlaps_fixed": topo_stats["overlap_fixed_count"],
         "holes_removed": topo_stats["holes_removed_count"],
         "holes_preserved": topo_stats["holes_preserved_count"],
+        "ledges_fixed": topo_stats["ledge_fixed_count"],
     }
 
     qa_report = {
