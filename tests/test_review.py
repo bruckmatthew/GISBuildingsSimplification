@@ -65,3 +65,36 @@ def test_corner_fix_evaluates_multipolygon_confidence_for_auto_clean():
     assert len(needs_review) == 0
     assert out.loc[0, "review_action"] == "auto_cleaned"
     assert "confidence=" in out.loc[0, "review_notes"]
+
+
+def test_corner_fix_default_tolerance_cleans_scaled_triangular_notch():
+    geom = Polygon(
+        [
+            (0, 0),
+            (100, 0),
+            (100, 100),
+            (60, 100),
+            (55, 80),
+            (50, 100),
+            (0, 100),
+            (0, 0),
+        ]
+    )
+    gdf = gpd.GeoDataFrame({"geometry": [geom]}, geometry="geometry", crs="EPSG:3857")
+
+    out, needs_review, stats = run_corner_fix_review(
+        gdf,
+        basemap="satellite",
+        area_delta_threshold=0.02,
+        min_right_angle_confidence=0.55,
+    )
+
+    cleaned = out.geometry.iloc[0]
+    notch_region = Polygon([(50.0, 80.0), (60.0, 80.0), (60.0, 100.0), (50.0, 100.0)])
+
+    assert stats["auto_cleaned_count"] == 1
+    assert len(needs_review) == 0
+    assert out.loc[0, "review_action"] == "auto_cleaned"
+    assert "notch cleaned" in out.loc[0, "review_notes"]
+    assert abs(cleaned.area - geom.area) / geom.area < 0.02
+    assert cleaned.intersection(notch_region).area > 80.0
