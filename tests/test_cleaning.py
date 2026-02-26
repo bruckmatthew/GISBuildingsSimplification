@@ -70,3 +70,23 @@ def test_merge_pass_merges_adjacent_offices_retail_features():
     merged_row = merged.iloc[0]
     assert merged_row["planning_z"] == "Offices, Retail Outlets"
     assert merged_row["merged_from_ids"] == "geom_0|geom_1"
+
+
+def test_merge_pass_handles_geographic_crs_with_default_threshold():
+    gdf = gpd.GeoDataFrame(
+        {
+            "planning_z": ["Offices, Retail Outlets", "Offices, Retail Outlets"],
+            "geometry": [
+                box(0.0, 0.0, 0.01, 0.01),
+                box(0.01, 0.0, 0.02, 0.01),
+            ],
+        },
+        geometry="geometry",
+        crs="EPSG:4326",
+    )
+
+    out = commercial_industrial_merge_pass(gdf)
+
+    merged = out[out["merge_pass"] == "merged"]
+    assert len(merged) == 1
+    assert merged.iloc[0]["planning_z"] == "Offices, Retail Outlets"
