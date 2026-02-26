@@ -4,6 +4,7 @@ from shapely.geometry import Polygon, box
 from app.cleaning import (
     _is_commercial_or_industrial,
     commercial_industrial_merge_pass,
+    fill_inter_polygon_voids,
     fill_narrow_indents,
     remove_narrow_ledges,
     resolve_overlaps,
@@ -325,3 +326,43 @@ def test_resolve_overlaps_returns_polygonal_geometries_only():
     out, _ = resolve_overlaps(gdf, overlap_area_threshold=0.0)
 
     assert all(geom.geom_type in {"Polygon", "MultiPolygon"} for geom in out.geometry)
+
+
+def test_resolve_overlaps_handles_non_range_index_labels():
+    gdf = gpd.GeoDataFrame(
+        {
+            "geometry": [box(0, 0, 10, 10), box(2, 2, 4, 4)],
+        },
+        index=[100, 200],
+        geometry="geometry",
+        crs="EPSG:3857",
+    )
+
+    out, fixed_count = resolve_overlaps(gdf, overlap_area_threshold=0.0)
+
+    assert fixed_count == 1
+    assert len(out) == 1
+
+
+def test_fill_inter_polygon_voids_fills_enclosed_gap_between_polygons():
+    frame = box(0, 0, 10, 10).difference(box(4, 4, 6, 6))
+    split = frame.intersection(box(0, 0, 5, 10)).union(frame.intersection(box(5, 0, 10, 10)))
+    parts = list(split.geoms) if hasattr(split, "geoms") else [split]
+
+    gdf = gpd.GeoDataFrame(
+        {"geometry": parts},
+        geometry="geometry",
+        crs="EPSG:3857",
+    )
+
+    before_union = gdf.geometry.union_all()
+    before_hole_count = sum(len(poly.interiors) for poly in getattr(before_union, "geoms", [before_union]))
+
+    out, filled_count = fill_inter_polygon_voids(gdf, min_void_area=0.0)
+
+    after_union = out.geometry.union_all()
+    after_hole_count = sum(len(poly.interiors) for poly in getattr(after_union, "geoms", [after_union]))
+
+    assert before_hole_count >= 1
+    assert filled_count >= 1
+    assert after_hole_count == 0

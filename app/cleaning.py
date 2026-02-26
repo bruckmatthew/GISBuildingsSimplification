@@ -368,6 +368,110 @@ def resolve_overlaps(
     if len(out) <= 1:
         return out, overlap_fixed_count
 
+    out = out.reset_index(drop=True)
+    geoms = [_polygonal_only(geom) for geom in out.geometry]
+
+    changed = True
+    while changed:
+        changed = False
+        probe = gpd.GeoDataFrame({"geometry": geoms}, geometry="geometry", crs=out.crs)
+        sindex = probe.sindex
+
+        for i, a in enumerate(geoms):
+            if a is None or a.is_empty:
+                continue
+
+            for j in sindex.intersection(a.bounds):
+                if j <= i:
+                    continue
+
+                b = geoms[j]
+                if b is None or b.is_empty:
+                    continue
+                if not a.intersects(b):
+                    continue
+
+                inter_area = float(a.intersection(b).area)
+                if inter_area <= overlap_area_threshold:
+                    continue
+
+                if a.area >= b.area:
+                    geoms[j] = _polygonal_only(make_valid(b.difference(a)))
+                else:
+                    geoms[i] = _polygonal_only(make_valid(a.difference(b)))
+                    a = geoms[i]
+                overlap_fixed_count += 1
+                changed = True
+
+        if not changed:
+            break
+
+    out.geometry = geoms
+    out = out[~out.geometry.is_empty].copy()
+    return out, overlap_fixed_count
+
+
+def _union_holes(geom) -> list[Polygon]:
+    if geom is None or geom.is_empty:
+        return []
+
+    holes: list[Polygon] = []
+    for poly in _polygon_parts(geom):
+        for ring in poly.interiors:
+            hole = Polygon(ring)
+            if hole is not None and not hole.is_empty and hole.area > 0:
+                holes.append(hole)
+    return holes
+
+
+def fill_inter_polygon_voids(
+    gdf: gpd.GeoDataFrame,
+    min_void_area: float = 0.0,
+) -> tuple[gpd.GeoDataFrame, int]:
+    """Fill enclosed empty voids formed between neighboring polygons."""
+    out = gdf.copy()
+    geoms = [_polygonal_only(geom) for geom in out.geometry]
+    dissolved = unary_union([geom for geom in geoms if geom is not None and not geom.is_empty])
+    holes = [hole for hole in _union_holes(dissolved) if hole.area > min_void_area]
+    if not holes:
+        out.geometry = geoms
+        out = out[~out.geometry.is_empty].copy()
+        return out, 0
+
+    fill_count = 0
+    for hole in holes:
+        best_idx = None
+        best_shared_len = 0.0
+        for idx, geom in enumerate(geoms):
+            if geom is None or geom.is_empty:
+                continue
+            shared = geom.boundary.intersection(hole.boundary)
+            shared_len = float(shared.length) if shared is not None and not shared.is_empty else 0.0
+            if shared_len > best_shared_len:
+                best_shared_len = shared_len
+                best_idx = idx
+
+        if best_idx is None or best_shared_len <= 0.0:
+            continue
+
+        geoms[best_idx] = _polygonal_only(make_valid(geoms[best_idx].union(hole)))
+        fill_count += 1
+
+    out.geometry = geoms
+    out = out[~out.geometry.is_empty].copy()
+    return out, fill_count
+
+def resolve_overlaps(
+    gdf: gpd.GeoDataFrame,
+    overlap_area_threshold: float = 0.5,
+) -> tuple[gpd.GeoDataFrame, int]:
+    """Remove polygon overlaps by subtracting larger geometries from smaller ones."""
+    out = gdf.copy()
+    overlap_fixed_count = 0
+
+    if len(out) <= 1:
+        return out, overlap_fixed_count
+
     sindex = out.sindex
     checked: set[tuple[int, int]] = set()
     updated_geoms = out.geometry.copy()
