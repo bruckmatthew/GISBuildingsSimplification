@@ -95,6 +95,29 @@ def _polygon_parts(geom) -> list[Polygon]:
     return []
 
 
+def _polygonal_only(geom):
+    """Keep only polygonal parts of a geometry; drop line/point leftovers."""
+    if geom is None or geom.is_empty:
+        return Polygon()
+
+    parts = _polygon_parts(geom)
+    if parts:
+        if len(parts) == 1:
+            return parts[0]
+        return MultiPolygon(parts)
+
+    if hasattr(geom, "geoms"):
+        nested_parts: list[Polygon] = []
+        for subgeom in geom.geoms:
+            nested_parts.extend(_polygon_parts(subgeom))
+        if len(nested_parts) == 1:
+            return nested_parts[0]
+        if nested_parts:
+            return MultiPolygon(nested_parts)
+
+    return Polygon()
+
+
 def _minimum_width_estimate(geom) -> float:
     if geom is None or geom.is_empty:
         return 0.0
@@ -298,6 +321,9 @@ def topology_qa_and_fixes(
     if invalid_fixed_count:
         out.loc[invalid_mask, "geometry"] = out.loc[invalid_mask, "geometry"].map(make_valid)
 
+    out.geometry = out.geometry.map(_polygonal_only)
+    out = out[~out.geometry.is_empty].copy()
+
     before = len(out)
     out["_geom_wkb"] = out.geometry.to_wkb()
     out = out.drop_duplicates(subset=["_geom_wkb"]).drop(columns=["_geom_wkb"])
@@ -309,43 +335,10 @@ def topology_qa_and_fixes(
     near_duplicate_removed_count = before_near - len(out)
     duplicate_removed_count = exact_duplicate_removed_count + near_duplicate_removed_count
 
-    overlap_fixed_count = 0
-    if len(out) > 1:
-        sindex = out.sindex
-        checked = set()
-        updated_geoms = out.geometry.copy()
-        for idx, geom in out.geometry.items():
-            for cand in sindex.intersection(geom.bounds):
-                if cand == idx:
-                    continue
-                key = tuple(sorted((idx, cand)))
-                if key in checked:
-                    continue
-                checked.add(key)
-                if idx not in updated_geoms.index or cand not in updated_geoms.index:
-                    continue
-
-                a = updated_geoms.loc[idx]
-                b = updated_geoms.loc[cand]
-                if a is None or b is None or a.is_empty or b.is_empty:
-                    continue
-                if not a.intersects(b):
-                    continue
-
-                inter_area = a.intersection(b).area
-                if inter_area <= overlap_area_threshold:
-                    continue
-
-                if a.area >= b.area:
-                    fixed = make_valid(b.difference(a))
-                    updated_geoms.loc[cand] = fixed
-                else:
-                    fixed = make_valid(a.difference(b))
-                    updated_geoms.loc[idx] = fixed
-                overlap_fixed_count += 1
-
-        out.geometry = updated_geoms
-        out = out[~out.geometry.is_empty].copy()
+    out, overlap_fixed_count = resolve_overlaps(
+        out,
+        overlap_area_threshold=overlap_area_threshold,
+    )
 
     out, hole_stats = strip_small_holes(
         out,
@@ -362,6 +355,56 @@ def topology_qa_and_fixes(
         "holes_removed_count": hole_stats["holes_removed_count"],
         "holes_preserved_count": hole_stats["holes_preserved_count"],
     }
+
+
+def resolve_overlaps(
+    gdf: gpd.GeoDataFrame,
+    overlap_area_threshold: float = 0.5,
+) -> tuple[gpd.GeoDataFrame, int]:
+    """Remove polygon overlaps by subtracting larger geometries from smaller ones."""
+    out = gdf.copy()
+    overlap_fixed_count = 0
+
+    if len(out) <= 1:
+        return out, overlap_fixed_count
+
+    sindex = out.sindex
+    checked: set[tuple[int, int]] = set()
+    updated_geoms = out.geometry.copy()
+
+    for idx, geom in out.geometry.items():
+        for cand in sindex.intersection(geom.bounds):
+            if cand == idx:
+                continue
+
+            key = tuple(sorted((idx, cand)))
+            if key in checked:
+                continue
+            checked.add(key)
+
+            if idx not in updated_geoms.index or cand not in updated_geoms.index:
+                continue
+
+            a = updated_geoms.loc[idx]
+            b = updated_geoms.loc[cand]
+            if a is None or b is None or a.is_empty or b.is_empty:
+                continue
+            if not a.intersects(b):
+                continue
+
+            inter_area = a.intersection(b).area
+            if inter_area <= overlap_area_threshold:
+                continue
+
+            if a.area >= b.area:
+                updated_geoms.loc[cand] = _polygonal_only(make_valid(b.difference(a)))
+            else:
+                updated_geoms.loc[idx] = _polygonal_only(make_valid(a.difference(b)))
+            overlap_fixed_count += 1
+
+    out.geometry = updated_geoms.map(_polygonal_only)
+    out = out[~out.geometry.is_empty].copy()
+    return out, overlap_fixed_count
 
 
 def _longest_shared_boundary(shared_edge) -> float:

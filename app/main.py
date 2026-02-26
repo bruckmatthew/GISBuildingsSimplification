@@ -15,6 +15,7 @@ def run_pipeline(
         commercial_industrial_merge_pass,
         fill_narrow_indents,
         remove_narrow_ledges,
+        resolve_overlaps,
         simplify_geometry,
         strip_small_holes,
         topology_qa_and_fixes,
@@ -63,7 +64,12 @@ def run_pipeline(
     # 8) Remove narrow ledges after indent fill
     gdf, ledge_stats = remove_narrow_ledges(gdf)
 
-    # 9) Final hole cleanup after all geometry-modifying passes
+    # 9) Final overlap cleanup after all geometry-modifying passes
+    gdf, post_process_overlap_fixed_count = resolve_overlaps(gdf, overlap_area_threshold=0.0)
+    topo_stats["overlap_fixed_count"] += post_process_overlap_fixed_count
+    topo_stats["post_process_overlaps_fixed_count"] = post_process_overlap_fixed_count
+
+    # 10) Final hole cleanup after all geometry-modifying passes
     gdf, post_merge_hole_stats = strip_small_holes(gdf)
     topo_stats["holes_removed_count"] += post_merge_hole_stats["holes_removed_count"]
     topo_stats["holes_preserved_count"] += post_merge_hole_stats["holes_preserved_count"]
@@ -77,7 +83,7 @@ def run_pipeline(
     topo_stats["indent_filled_area_total"] = indent_stats["indent_filled_area_total"]
     topo_stats["indent_skipped_count"] = indent_stats["indent_skipped_count"]
 
-    # 10) Export outputs and QA report
+    # 11) Export outputs and QA report
     export_info = write_shapefile(gdf, output_path)
     review_export = write_review_layer(needs_review_layer, output_path)
     if review_export is not None:
