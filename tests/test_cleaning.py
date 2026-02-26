@@ -289,3 +289,39 @@ def test_resolve_overlaps_strict_threshold_removes_tiny_overlap():
     assert fixed_count == 1
     assert len(out) == 2
     assert out.geometry.iloc[0].intersection(out.geometry.iloc[1]).area == 0.0
+
+
+def test_topology_qa_and_fixes_drops_non_polygon_results_from_make_valid():
+    degenerate = Polygon([(0, 0), (1, 0), (2, 0), (0, 0)])
+    valid_poly = box(0, 0, 5, 5)
+
+    gdf = gpd.GeoDataFrame(
+        {
+            "geometry": [degenerate, valid_poly],
+        },
+        geometry="geometry",
+        crs="EPSG:3857",
+    )
+
+    out, _ = topology_qa_and_fixes(gdf, overlap_area_threshold=0.0)
+
+    assert len(out) == 1
+    assert out.geometry.iloc[0].geom_type in {"Polygon", "MultiPolygon"}
+
+
+def test_resolve_overlaps_returns_polygonal_geometries_only():
+    outer = box(0, 0, 10, 10)
+    inner = box(2, 2, 4, 4)
+    degenerate = Polygon([(0, 0), (1, 0), (2, 0), (0, 0)])
+
+    gdf = gpd.GeoDataFrame(
+        {
+            "geometry": [outer, inner, degenerate],
+        },
+        geometry="geometry",
+        crs="EPSG:3857",
+    )
+
+    out, _ = resolve_overlaps(gdf, overlap_area_threshold=0.0)
+
+    assert all(geom.geom_type in {"Polygon", "MultiPolygon"} for geom in out.geometry)

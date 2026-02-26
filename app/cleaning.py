@@ -95,6 +95,29 @@ def _polygon_parts(geom) -> list[Polygon]:
     return []
 
 
+def _polygonal_only(geom):
+    """Keep only polygonal parts of a geometry; drop line/point leftovers."""
+    if geom is None or geom.is_empty:
+        return Polygon()
+
+    parts = _polygon_parts(geom)
+    if parts:
+        if len(parts) == 1:
+            return parts[0]
+        return MultiPolygon(parts)
+
+    if hasattr(geom, "geoms"):
+        nested_parts: list[Polygon] = []
+        for subgeom in geom.geoms:
+            nested_parts.extend(_polygon_parts(subgeom))
+        if len(nested_parts) == 1:
+            return nested_parts[0]
+        if nested_parts:
+            return MultiPolygon(nested_parts)
+
+    return Polygon()
+
+
 def _minimum_width_estimate(geom) -> float:
     if geom is None or geom.is_empty:
         return 0.0
@@ -298,6 +321,9 @@ def topology_qa_and_fixes(
     if invalid_fixed_count:
         out.loc[invalid_mask, "geometry"] = out.loc[invalid_mask, "geometry"].map(make_valid)
 
+    out.geometry = out.geometry.map(_polygonal_only)
+    out = out[~out.geometry.is_empty].copy()
+
     before = len(out)
     out["_geom_wkb"] = out.geometry.to_wkb()
     out = out.drop_duplicates(subset=["_geom_wkb"]).drop(columns=["_geom_wkb"])
@@ -371,12 +397,12 @@ def resolve_overlaps(
                 continue
 
             if a.area >= b.area:
-                updated_geoms.loc[cand] = make_valid(b.difference(a))
+                updated_geoms.loc[cand] = _polygonal_only(make_valid(b.difference(a)))
             else:
-                updated_geoms.loc[idx] = make_valid(a.difference(b))
+                updated_geoms.loc[idx] = _polygonal_only(make_valid(a.difference(b)))
             overlap_fixed_count += 1
 
-    out.geometry = updated_geoms
+    out.geometry = updated_geoms.map(_polygonal_only)
     out = out[~out.geometry.is_empty].copy()
     return out, overlap_fixed_count
 
