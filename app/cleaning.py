@@ -95,6 +95,29 @@ def _polygon_parts(geom) -> list[Polygon]:
     return []
 
 
+def _polygonal_only(geom):
+    """Keep only polygonal parts of a geometry; drop line/point leftovers."""
+    if geom is None or geom.is_empty:
+        return Polygon()
+
+    parts = _polygon_parts(geom)
+    if parts:
+        if len(parts) == 1:
+            return parts[0]
+        return MultiPolygon(parts)
+
+    if hasattr(geom, "geoms"):
+        nested_parts: list[Polygon] = []
+        for subgeom in geom.geoms:
+            nested_parts.extend(_polygon_parts(subgeom))
+        if len(nested_parts) == 1:
+            return nested_parts[0]
+        if nested_parts:
+            return MultiPolygon(nested_parts)
+
+    return Polygon()
+
+
 def _minimum_width_estimate(geom) -> float:
     if geom is None or geom.is_empty:
         return 0.0
@@ -298,6 +321,9 @@ def topology_qa_and_fixes(
     if invalid_fixed_count:
         out.loc[invalid_mask, "geometry"] = out.loc[invalid_mask, "geometry"].map(make_valid)
 
+    out.geometry = out.geometry.map(_polygonal_only)
+    out = out[~out.geometry.is_empty].copy()
+
     before = len(out)
     out["_geom_wkb"] = out.geometry.to_wkb()
     out = out.drop_duplicates(subset=["_geom_wkb"]).drop(columns=["_geom_wkb"])
@@ -309,43 +335,10 @@ def topology_qa_and_fixes(
     near_duplicate_removed_count = before_near - len(out)
     duplicate_removed_count = exact_duplicate_removed_count + near_duplicate_removed_count
 
-    overlap_fixed_count = 0
-    if len(out) > 1:
-        sindex = out.sindex
-        checked = set()
-        updated_geoms = out.geometry.copy()
-        for idx, geom in out.geometry.items():
-            for cand in sindex.intersection(geom.bounds):
-                if cand == idx:
-                    continue
-                key = tuple(sorted((idx, cand)))
-                if key in checked:
-                    continue
-                checked.add(key)
-                if idx not in updated_geoms.index or cand not in updated_geoms.index:
-                    continue
-
-                a = updated_geoms.loc[idx]
-                b = updated_geoms.loc[cand]
-                if a is None or b is None or a.is_empty or b.is_empty:
-                    continue
-                if not a.intersects(b):
-                    continue
-
-                inter_area = a.intersection(b).area
-                if inter_area <= overlap_area_threshold:
-                    continue
-
-                if a.area >= b.area:
-                    fixed = make_valid(b.difference(a))
-                    updated_geoms.loc[cand] = fixed
-                else:
-                    fixed = make_valid(a.difference(b))
-                    updated_geoms.loc[idx] = fixed
-                overlap_fixed_count += 1
-
-        out.geometry = updated_geoms
-        out = out[~out.geometry.is_empty].copy()
+    out, overlap_fixed_count = resolve_overlaps(
+        out,
+        overlap_area_threshold=overlap_area_threshold,
+    )
 
     out, hole_stats = strip_small_holes(
         out,
@@ -363,6 +356,110 @@ def topology_qa_and_fixes(
         "holes_preserved_count": hole_stats["holes_preserved_count"],
     }
 
+
+def resolve_overlaps(
+    gdf: gpd.GeoDataFrame,
+    overlap_area_threshold: float = 0.5,
+) -> tuple[gpd.GeoDataFrame, int]:
+    """Remove polygon overlaps by subtracting larger geometries from smaller ones."""
+    out = gdf.copy()
+    overlap_fixed_count = 0
+
+    if len(out) <= 1:
+        return out, overlap_fixed_count
+
+    out = out.reset_index(drop=True)
+    geoms = [_polygonal_only(geom) for geom in out.geometry]
+
+    changed = True
+    while changed:
+        changed = False
+        probe = gpd.GeoDataFrame({"geometry": geoms}, geometry="geometry", crs=out.crs)
+        sindex = probe.sindex
+
+        for i, a in enumerate(geoms):
+            if a is None or a.is_empty:
+                continue
+
+            for j in sindex.intersection(a.bounds):
+                if j <= i:
+                    continue
+
+                b = geoms[j]
+                if b is None or b.is_empty:
+                    continue
+                if not a.intersects(b):
+                    continue
+
+                inter_area = float(a.intersection(b).area)
+                if inter_area <= overlap_area_threshold:
+                    continue
+
+                if a.area >= b.area:
+                    geoms[j] = _polygonal_only(make_valid(b.difference(a)))
+                else:
+                    geoms[i] = _polygonal_only(make_valid(a.difference(b)))
+                    a = geoms[i]
+                overlap_fixed_count += 1
+                changed = True
+
+        if not changed:
+            break
+
+    out.geometry = geoms
+    out = out[~out.geometry.is_empty].copy()
+    return out, overlap_fixed_count
+
+
+def _union_holes(geom) -> list[Polygon]:
+    if geom is None or geom.is_empty:
+        return []
+
+    holes: list[Polygon] = []
+    for poly in _polygon_parts(geom):
+        for ring in poly.interiors:
+            hole = Polygon(ring)
+            if hole is not None and not hole.is_empty and hole.area > 0:
+                holes.append(hole)
+    return holes
+
+
+def fill_inter_polygon_voids(
+    gdf: gpd.GeoDataFrame,
+    min_void_area: float = 0.0,
+) -> tuple[gpd.GeoDataFrame, int]:
+    """Fill enclosed empty voids formed between neighboring polygons."""
+    out = gdf.copy()
+    geoms = [_polygonal_only(geom) for geom in out.geometry]
+    dissolved = unary_union([geom for geom in geoms if geom is not None and not geom.is_empty])
+    holes = [hole for hole in _union_holes(dissolved) if hole.area > min_void_area]
+    if not holes:
+        out.geometry = geoms
+        out = out[~out.geometry.is_empty].copy()
+        return out, 0
+
+    fill_count = 0
+    for hole in holes:
+        best_idx = None
+        best_shared_len = 0.0
+        for idx, geom in enumerate(geoms):
+            if geom is None or geom.is_empty:
+                continue
+            shared = geom.boundary.intersection(hole.boundary)
+            shared_len = float(shared.length) if shared is not None and not shared.is_empty else 0.0
+            if shared_len > best_shared_len:
+                best_shared_len = shared_len
+                best_idx = idx
+
+        if best_idx is None or best_shared_len <= 0.0:
+            continue
+
+        geoms[best_idx] = _polygonal_only(make_valid(geoms[best_idx].union(hole)))
+        fill_count += 1
+
+    out.geometry = geoms
+    out = out[~out.geometry.is_empty].copy()
+    return out, fill_count
 
 def _longest_shared_boundary(shared_edge) -> float:
     if shared_edge is None or shared_edge.is_empty:

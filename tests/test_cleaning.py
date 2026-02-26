@@ -4,8 +4,11 @@ from shapely.geometry import Polygon, box
 from app.cleaning import (
     _is_commercial_or_industrial,
     commercial_industrial_merge_pass,
+    fill_inter_polygon_voids,
     fill_narrow_indents,
     remove_narrow_ledges,
+    resolve_overlaps,
+    topology_qa_and_fixes,
 )
 
 
@@ -229,3 +232,137 @@ def test_fill_narrow_indents_skips_large_area_gains():
     assert stats["indent_fixed_count"] == 0
     assert stats["indent_skipped_count"] == 1
     assert out.geometry.iloc[0].equals_exact(geom, tolerance=1e-6)
+
+
+def test_resolve_overlaps_removes_polygon_inside_another():
+    gdf = gpd.GeoDataFrame(
+        {
+            "geometry": [
+                box(0, 0, 10, 10),
+                box(2, 2, 4, 4),
+            ],
+        },
+        geometry="geometry",
+        crs="EPSG:3857",
+    )
+
+    out, fixed_count = resolve_overlaps(gdf, overlap_area_threshold=0.1)
+
+    assert fixed_count == 1
+    assert len(out) == 1
+    assert out.geometry.iloc[0].equals_exact(box(0, 0, 10, 10), tolerance=1e-6)
+
+
+def test_topology_qa_and_fixes_resolves_overlaps_after_multiple_passes():
+    gdf = gpd.GeoDataFrame(
+        {
+            "geometry": [
+                box(0, 0, 10, 10),
+                box(2, 2, 9, 9),
+                box(3, 3, 8, 8),
+            ],
+        },
+        geometry="geometry",
+        crs="EPSG:3857",
+    )
+
+    out, stats = topology_qa_and_fixes(gdf, overlap_area_threshold=0.1)
+
+    assert stats["overlap_fixed_count"] == 2
+    assert len(out) == 1
+    assert out.geometry.iloc[0].equals_exact(box(0, 0, 10, 10), tolerance=1e-6)
+
+
+def test_resolve_overlaps_strict_threshold_removes_tiny_overlap():
+    gdf = gpd.GeoDataFrame(
+        {
+            "geometry": [
+                box(0, 0, 10, 10),
+                box(9.95, 9.95, 10.05, 10.05),
+            ],
+        },
+        geometry="geometry",
+        crs="EPSG:3857",
+    )
+
+    out, fixed_count = resolve_overlaps(gdf, overlap_area_threshold=0.0)
+
+    assert fixed_count == 1
+    assert len(out) == 2
+    assert out.geometry.iloc[0].intersection(out.geometry.iloc[1]).area == 0.0
+
+
+def test_topology_qa_and_fixes_drops_non_polygon_results_from_make_valid():
+    degenerate = Polygon([(0, 0), (1, 0), (2, 0), (0, 0)])
+    valid_poly = box(0, 0, 5, 5)
+
+    gdf = gpd.GeoDataFrame(
+        {
+            "geometry": [degenerate, valid_poly],
+        },
+        geometry="geometry",
+        crs="EPSG:3857",
+    )
+
+    out, _ = topology_qa_and_fixes(gdf, overlap_area_threshold=0.0)
+
+    assert len(out) == 1
+    assert out.geometry.iloc[0].geom_type in {"Polygon", "MultiPolygon"}
+
+
+def test_resolve_overlaps_returns_polygonal_geometries_only():
+    outer = box(0, 0, 10, 10)
+    inner = box(2, 2, 4, 4)
+    degenerate = Polygon([(0, 0), (1, 0), (2, 0), (0, 0)])
+
+    gdf = gpd.GeoDataFrame(
+        {
+            "geometry": [outer, inner, degenerate],
+        },
+        geometry="geometry",
+        crs="EPSG:3857",
+    )
+
+    out, _ = resolve_overlaps(gdf, overlap_area_threshold=0.0)
+
+    assert all(geom.geom_type in {"Polygon", "MultiPolygon"} for geom in out.geometry)
+
+
+def test_resolve_overlaps_handles_non_range_index_labels():
+    gdf = gpd.GeoDataFrame(
+        {
+            "geometry": [box(0, 0, 10, 10), box(2, 2, 4, 4)],
+        },
+        index=[100, 200],
+        geometry="geometry",
+        crs="EPSG:3857",
+    )
+
+    out, fixed_count = resolve_overlaps(gdf, overlap_area_threshold=0.0)
+
+    assert fixed_count == 1
+    assert len(out) == 1
+
+
+def test_fill_inter_polygon_voids_fills_enclosed_gap_between_polygons():
+    frame = box(0, 0, 10, 10).difference(box(4, 4, 6, 6))
+    split = frame.intersection(box(0, 0, 5, 10)).union(frame.intersection(box(5, 0, 10, 10)))
+    parts = list(split.geoms) if hasattr(split, "geoms") else [split]
+
+    gdf = gpd.GeoDataFrame(
+        {"geometry": parts},
+        geometry="geometry",
+        crs="EPSG:3857",
+    )
+
+    before_union = gdf.geometry.union_all()
+    before_hole_count = sum(len(poly.interiors) for poly in getattr(before_union, "geoms", [before_union]))
+
+    out, filled_count = fill_inter_polygon_voids(gdf, min_void_area=0.0)
+
+    after_union = out.geometry.union_all()
+    after_hole_count = sum(len(poly.interiors) for poly in getattr(after_union, "geoms", [after_union]))
+
+    assert before_hole_count >= 1
+    assert filled_count >= 1
+    assert after_hole_count == 0
