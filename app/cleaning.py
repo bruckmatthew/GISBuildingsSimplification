@@ -191,11 +191,24 @@ def _longest_shared_boundary(shared_edge) -> float:
 
 def _normalize_planning_z_text(value: object) -> str:
     """Normalize planning_z text for strict-yet-robust category matching."""
-    text = str(value).replace("\u00a0", " ").strip().lower()
+    text = str(value).replace(" ", " ").strip().lower()
     text = " ".join(text.split())
-    text = text.replace(", ", ",").replace(" ,", ",")
-    text = text.replace("/ ", "/").replace(" /", "/")
     return text
+
+
+def _planning_z_tokens(value: object) -> tuple[str, ...]:
+    """Tokenize planning text while ignoring punctuation separators."""
+    text = _normalize_planning_z_text(value)
+    cleaned = "".join(ch if ch.isalnum() else " " for ch in text)
+    return tuple(tok for tok in cleaned.split() if tok)
+
+
+def _accepted_target_tokens() -> set[tuple[str, ...]]:
+    """Accepted planning_z token sequences for the adjacent target merge pass."""
+    return {
+        ("offices", "retail", "outlets"),
+        ("industrial", "utilities"),
+    }
 
 
 def _is_commercial_or_industrial(value: object) -> bool:
@@ -203,15 +216,8 @@ def _is_commercial_or_industrial(value: object) -> bool:
     if value is None:
         return False
 
-    text = _normalize_planning_z_text(value)
-    if not text:
-        return False
-
-    accepted = {
-        "offices,retail outlets",
-        "industrial/utilities",
-    }
-    return text in accepted
+    tokens = _planning_z_tokens(value)
+    return tokens in _accepted_target_tokens()
 
 
 def _blocked_by_barriers(
@@ -261,9 +267,28 @@ def commercial_industrial_merge_pass(
     out["merge_cluster_id"] = pd.NA
     out["merged_from_ids"] = pd.NA
 
-    target_mask = out[use_col].map(_is_commercial_or_industrial)
+    planning_tokens = out[use_col].map(_planning_z_tokens)
+    accepted_tokens = _accepted_target_tokens()
+    target_mask = planning_tokens.map(lambda t: t in accepted_tokens)
+    target_count = int(target_mask.sum())
+
+    observed_token_counts = (
+        planning_tokens.value_counts(dropna=False)
+        .head(10)
+        .to_dict()
+    )
+    observed_token_counts = {" ".join(k): int(v) for k, v in observed_token_counts.items()}
+    accepted_token_labels = [" ".join(t) for t in sorted(accepted_tokens)]
+
     if not target_mask.any():
         out.attrs["merge_log"] = []
+        out.attrs["merge_stats"] = {
+            "target_candidate_count": target_count,
+            "merged_cluster_count": 0,
+            "merged_feature_count": 0,
+            "accepted_target_tokens": accepted_token_labels,
+            "observed_top_planning_tokens": observed_token_counts,
+        }
         return out
 
     target = out[target_mask].copy()
@@ -364,4 +389,13 @@ def commercial_industrial_merge_pass(
     combined = pd.concat([non_target, merged_target], ignore_index=True, sort=False)
     result = gpd.GeoDataFrame(combined, geometry="geometry", crs=gdf.crs)
     result.attrs["merge_log"] = merge_log
+    merged_clusters = sum(1 for entry in merge_log if int(entry.get("member_count", 0)) > 1)
+    merged_members = sum(int(entry.get("member_count", 0)) for entry in merge_log if int(entry.get("member_count", 0)) > 1)
+    result.attrs["merge_stats"] = {
+        "target_candidate_count": target_count,
+        "merged_cluster_count": int(merged_clusters),
+        "merged_feature_count": int(merged_members),
+        "accepted_target_tokens": accepted_token_labels,
+        "observed_top_planning_tokens": observed_token_counts,
+    }
     return result

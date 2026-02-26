@@ -53,6 +53,7 @@ def run_pipeline(
     gdf = commercial_industrial_merge_pass(gdf)
     after_adjacent_target_merge_count = len(gdf)
     adjacent_target_merge_log = gdf.attrs.get("merge_log", [])
+    adjacent_target_merge_stats = gdf.attrs.get("merge_stats", {})
 
     # 7) Final hole cleanup after all geometry-modifying passes
     gdf, post_merge_hole_stats = strip_small_holes(gdf)
@@ -97,6 +98,11 @@ def run_pipeline(
             "feature_count_after_adjacent_target_merge": after_adjacent_target_merge_count,
             "adjacent_target_merge_log_count": len(adjacent_target_merge_log),
             "adjacent_target_merge_log": adjacent_target_merge_log,
+            "adjacent_target_target_candidate_count": adjacent_target_merge_stats.get("target_candidate_count", 0),
+            "adjacent_target_merged_cluster_count": adjacent_target_merge_stats.get("merged_cluster_count", 0),
+            "adjacent_target_merged_feature_count": adjacent_target_merge_stats.get("merged_feature_count", 0),
+            "adjacent_target_accepted_tokens": adjacent_target_merge_stats.get("accepted_target_tokens", []),
+            "adjacent_target_observed_top_tokens": adjacent_target_merge_stats.get("observed_top_planning_tokens", {}),
         },
         "export": export_info,
     }

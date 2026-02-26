@@ -13,6 +13,7 @@ def test_is_commercial_or_industrial_accepts_only_explicit_values():
 
     assert not _is_commercial_or_industrial("Commercial/Business")
     assert not _is_commercial_or_industrial("Industrial Park")
+    assert not _is_commercial_or_industrial("Offices and Retail Outlets")
     assert not _is_commercial_or_industrial("")
     assert not _is_commercial_or_industrial(None)
 
@@ -21,6 +22,7 @@ def test_is_commercial_or_industrial_handles_spacing_variants_for_offices_retail
     assert _is_commercial_or_industrial("Offices,Retail Outlets")
     assert _is_commercial_or_industrial("Offices,  Retail Outlets")
     assert _is_commercial_or_industrial("Offices, Retail Outlets")
+    assert _is_commercial_or_industrial("Offices / Retail Outlets")
 
 
 def test_merge_pass_preserves_representative_planning_category_after_merge():
@@ -90,3 +92,23 @@ def test_merge_pass_handles_geographic_crs_with_default_threshold():
     merged = out[out["merge_pass"] == "merged"]
     assert len(merged) == 1
     assert merged.iloc[0]["planning_z"] == "Offices, Retail Outlets"
+
+
+def test_merge_pass_sets_merge_stats_in_attrs():
+    gdf = gpd.GeoDataFrame(
+        {
+            "planning_z": ["Offices, Retail Outlets", "Offices, Retail Outlets", "Residential"],
+            "geometry": [box(0, 0, 1, 1), box(1, 0, 2, 1), box(5, 5, 6, 6)],
+        },
+        geometry="geometry",
+        crs="EPSG:3857",
+    )
+
+    out = commercial_industrial_merge_pass(gdf, min_shared_edge_m=0.5)
+    stats = out.attrs.get("merge_stats", {})
+
+    assert stats.get("target_candidate_count") == 2
+    assert stats.get("merged_cluster_count") == 1
+    assert stats.get("merged_feature_count") == 2
+    assert "offices retail outlets" in stats.get("accepted_target_tokens", [])
+    assert stats.get("observed_top_planning_tokens", {}).get("offices retail outlets") == 2
