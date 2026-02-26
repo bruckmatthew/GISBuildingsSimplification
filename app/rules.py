@@ -55,3 +55,24 @@ def recategorize_small_garages(
     out.loc[garage_mask, "recat_reason"] = f"garage_lt_{threshold_label}m2"
 
     return out, int(garage_mask.sum())
+
+
+def remove_small_industrial_office_retail(
+    gdf: gpd.GeoDataFrame,
+    min_area_m2: float = 500.0,
+) -> tuple[gpd.GeoDataFrame, int]:
+    """Drop small Industrial/Utilities and Offices, Retail Outlets features."""
+    out = gdf.copy()
+
+    planning_col = "planning_z" if "planning_z" in out.columns else None
+    out["area_m2"] = _area_square_meters(out)
+    if planning_col is None:
+        return out, 0
+
+    planning_text = out[planning_col].fillna("").astype(str).str.replace("\xa0", " ", regex=False)
+    planning_text = planning_text.str.strip().str.lower()
+
+    target_mask = planning_text.isin({"industrial/utilities", "offices, retail outlets"})
+    small_target_mask = target_mask & out["area_m2"].fillna(0).lt(float(min_area_m2))
+    kept = out.loc[~small_target_mask].copy()
+    return kept, int(small_target_mask.sum())
