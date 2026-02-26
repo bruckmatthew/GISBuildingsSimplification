@@ -4,6 +4,7 @@ from shapely.geometry import Polygon, box
 from app.cleaning import (
     _is_commercial_or_industrial,
     commercial_industrial_merge_pass,
+    fill_narrow_indents,
     remove_narrow_ledges,
 )
 
@@ -155,3 +156,76 @@ def test_remove_narrow_ledges_handles_multipolygon_parts():
 
     assert stats["ledge_fixed_count"] == 1
     assert out.geometry.iloc[0].area < multi.area
+
+
+def test_fill_narrow_indents_fills_small_inward_notch():
+    geom = Polygon(
+        [
+            (0, 0),
+            (10, 0),
+            (10, 10),
+            (6, 10),
+            (6, 8),
+            (5, 8),
+            (5, 10),
+            (0, 10),
+            (0, 0),
+        ]
+    )
+
+    gdf = gpd.GeoDataFrame({"geometry": [geom]}, geometry="geometry", crs="EPSG:3857")
+
+    out, stats = fill_narrow_indents(gdf, width_threshold_m=2.0, area_threshold_m2=3.0)
+
+    assert stats["indent_fixed_count"] == 1
+    cleaned_geom = out.geometry.iloc[0]
+    assert cleaned_geom.area > geom.area
+
+
+
+
+def test_fill_narrow_indents_uses_multiscale_close_for_wider_notch():
+    geom = Polygon(
+        [
+            (0, 0),
+            (30, 0),
+            (30, 20),
+            (18, 20),
+            (18, 16),
+            (14, 16),
+            (14, 20),
+            (0, 20),
+            (0, 0),
+        ]
+    )
+
+    gdf = gpd.GeoDataFrame({"geometry": [geom]}, geometry="geometry", crs="EPSG:3857")
+
+    out, stats = fill_narrow_indents(gdf, width_threshold_m=1.2, area_threshold_m2=10.0)
+
+    assert stats["indent_fixed_count"] >= 1
+    cleaned_geom = out.geometry.iloc[0]
+    assert cleaned_geom.area > geom.area + 8.0
+
+def test_fill_narrow_indents_skips_large_area_gains():
+    geom = Polygon(
+        [
+            (0, 0),
+            (12, 0),
+            (12, 10),
+            (10, 10),
+            (10, 4),
+            (2, 4),
+            (2, 10),
+            (0, 10),
+            (0, 0),
+        ]
+    )
+
+    gdf = gpd.GeoDataFrame({"geometry": [geom]}, geometry="geometry", crs="EPSG:3857")
+
+    out, stats = fill_narrow_indents(gdf, width_threshold_m=5.0, area_threshold_m2=40.0)
+
+    assert stats["indent_fixed_count"] == 0
+    assert stats["indent_skipped_count"] == 1
+    assert out.geometry.iloc[0].equals_exact(geom, tolerance=1e-6)
