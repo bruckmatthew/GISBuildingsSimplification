@@ -182,16 +182,41 @@ def test_fill_narrow_indents_fills_small_inward_notch():
     assert cleaned_geom.area > geom.area
 
 
+
+
+def test_fill_narrow_indents_uses_multiscale_close_for_wider_notch():
+    geom = Polygon(
+        [
+            (0, 0),
+            (30, 0),
+            (30, 20),
+            (18, 20),
+            (18, 16),
+            (14, 16),
+            (14, 20),
+            (0, 20),
+            (0, 0),
+        ]
+    )
+
+    gdf = gpd.GeoDataFrame({"geometry": [geom]}, geometry="geometry", crs="EPSG:3857")
+
+    out, stats = fill_narrow_indents(gdf, width_threshold_m=1.2, area_threshold_m2=10.0)
+
+    assert stats["indent_fixed_count"] >= 1
+    cleaned_geom = out.geometry.iloc[0]
+    assert cleaned_geom.area > geom.area + 8.0
+
 def test_fill_narrow_indents_skips_large_area_gains():
     geom = Polygon(
         [
             (0, 0),
             (12, 0),
             (12, 10),
-            (8, 10),
-            (8, 6),
-            (4, 6),
-            (4, 10),
+            (10, 10),
+            (10, 4),
+            (2, 4),
+            (2, 10),
             (0, 10),
             (0, 0),
         ]

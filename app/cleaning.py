@@ -198,8 +198,13 @@ def fill_narrow_indents(
     gdf: gpd.GeoDataFrame,
     width_threshold_m: float = 1.2,
     area_threshold_m2: float = 10.0,
+    max_gain_ratio: float = 0.2,
 ) -> tuple[gpd.GeoDataFrame, dict[str, float]]:
-    """Fill narrow inward notches via morphological closing when gain is controlled."""
+    """Fill narrow inward notches via controlled multi-scale morphological closing.
+
+    A single close distance misses many real-world notches, so this applies progressive
+    close distances (base, 1.5x, 2x) while keeping strict guards on added area and width.
+    """
     out = gdf.copy()
     cleaned_geoms = []
 
@@ -207,47 +212,50 @@ def fill_narrow_indents(
     indent_filled_area_total = 0.0
     indent_skipped_count = 0
 
-    distance = max(width_threshold_m / 2.0, 0.01)
-    max_gain_ratio = 0.12
+    base_width = max(width_threshold_m, 0.2)
+    close_widths = (base_width, base_width * 1.5, base_width * 2.0, base_width * 3.0, base_width * 4.0)
 
     for geom in out.geometry:
         if geom is None or geom.is_empty:
             cleaned_geoms.append(geom)
             continue
 
-        valid_geom = make_valid(geom)
-        if valid_geom.is_empty:
+        candidate = make_valid(geom)
+        if candidate.is_empty:
             cleaned_geoms.append(geom)
             continue
 
-        original_area = float(valid_geom.area)
-        closed = valid_geom.buffer(distance, join_style=2).buffer(-distance, join_style=2)
-        closed = make_valid(closed)
+        original_area = float(candidate.area)
+        applied = False
 
-        if closed.is_empty:
-            cleaned_geoms.append(valid_geom)
-            indent_skipped_count += 1
-            continue
+        for close_width in close_widths:
+            distance = max(close_width / 2.0, 0.01)
+            closed = candidate.buffer(distance, join_style=2).buffer(-distance, join_style=2)
+            closed = make_valid(closed)
+            if closed.is_empty:
+                continue
 
-        added = make_valid(closed.difference(valid_geom))
-        added_area = float(added.area) if not added.is_empty else 0.0
-        if added_area <= 0.0:
-            cleaned_geoms.append(valid_geom)
-            continue
+            added = make_valid(closed.difference(candidate))
+            added_area = float(added.area) if not added.is_empty else 0.0
+            if added_area <= 0.0:
+                continue
 
-        area_gain_ratio = added_area / original_area if original_area > 0 else 0.0
-        should_replace = _is_small_narrow_removed_piece(
-            added,
-            width_threshold_m=width_threshold_m,
-            area_threshold_m2=area_threshold_m2,
-        ) and area_gain_ratio <= max_gain_ratio
+            dynamic_area_cap = max(float(area_threshold_m2), original_area * 0.06)
+            area_gain_ratio = added_area / original_area if original_area > 0 else 0.0
+            is_narrow_gain = _is_small_narrow_removed_piece(
+                added,
+                width_threshold_m=close_width,
+                area_threshold_m2=dynamic_area_cap,
+            )
 
-        if should_replace:
-            cleaned_geoms.append(closed)
-            indent_fixed_count += 1
-            indent_filled_area_total += added_area
-        else:
-            cleaned_geoms.append(valid_geom)
+            if is_narrow_gain and area_gain_ratio <= max_gain_ratio:
+                candidate = closed
+                indent_fixed_count += 1
+                indent_filled_area_total += added_area
+                applied = True
+
+        cleaned_geoms.append(candidate)
+        if not applied:
             indent_skipped_count += 1
 
     out.geometry = cleaned_geoms
