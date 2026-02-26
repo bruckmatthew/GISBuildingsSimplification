@@ -6,6 +6,8 @@ from app.cleaning import (
     commercial_industrial_merge_pass,
     fill_narrow_indents,
     remove_narrow_ledges,
+    resolve_overlaps,
+    topology_qa_and_fixes,
 )
 
 
@@ -229,3 +231,42 @@ def test_fill_narrow_indents_skips_large_area_gains():
     assert stats["indent_fixed_count"] == 0
     assert stats["indent_skipped_count"] == 1
     assert out.geometry.iloc[0].equals_exact(geom, tolerance=1e-6)
+
+
+def test_resolve_overlaps_removes_polygon_inside_another():
+    gdf = gpd.GeoDataFrame(
+        {
+            "geometry": [
+                box(0, 0, 10, 10),
+                box(2, 2, 4, 4),
+            ],
+        },
+        geometry="geometry",
+        crs="EPSG:3857",
+    )
+
+    out, fixed_count = resolve_overlaps(gdf, overlap_area_threshold=0.1)
+
+    assert fixed_count == 1
+    assert len(out) == 1
+    assert out.geometry.iloc[0].equals_exact(box(0, 0, 10, 10), tolerance=1e-6)
+
+
+def test_topology_qa_and_fixes_resolves_overlaps_after_multiple_passes():
+    gdf = gpd.GeoDataFrame(
+        {
+            "geometry": [
+                box(0, 0, 10, 10),
+                box(2, 2, 9, 9),
+                box(3, 3, 8, 8),
+            ],
+        },
+        geometry="geometry",
+        crs="EPSG:3857",
+    )
+
+    out, stats = topology_qa_and_fixes(gdf, overlap_area_threshold=0.1)
+
+    assert stats["overlap_fixed_count"] == 2
+    assert len(out) == 1
+    assert out.geometry.iloc[0].equals_exact(box(0, 0, 10, 10), tolerance=1e-6)

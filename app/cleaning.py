@@ -309,43 +309,10 @@ def topology_qa_and_fixes(
     near_duplicate_removed_count = before_near - len(out)
     duplicate_removed_count = exact_duplicate_removed_count + near_duplicate_removed_count
 
-    overlap_fixed_count = 0
-    if len(out) > 1:
-        sindex = out.sindex
-        checked = set()
-        updated_geoms = out.geometry.copy()
-        for idx, geom in out.geometry.items():
-            for cand in sindex.intersection(geom.bounds):
-                if cand == idx:
-                    continue
-                key = tuple(sorted((idx, cand)))
-                if key in checked:
-                    continue
-                checked.add(key)
-                if idx not in updated_geoms.index or cand not in updated_geoms.index:
-                    continue
-
-                a = updated_geoms.loc[idx]
-                b = updated_geoms.loc[cand]
-                if a is None or b is None or a.is_empty or b.is_empty:
-                    continue
-                if not a.intersects(b):
-                    continue
-
-                inter_area = a.intersection(b).area
-                if inter_area <= overlap_area_threshold:
-                    continue
-
-                if a.area >= b.area:
-                    fixed = make_valid(b.difference(a))
-                    updated_geoms.loc[cand] = fixed
-                else:
-                    fixed = make_valid(a.difference(b))
-                    updated_geoms.loc[idx] = fixed
-                overlap_fixed_count += 1
-
-        out.geometry = updated_geoms
-        out = out[~out.geometry.is_empty].copy()
+    out, overlap_fixed_count = resolve_overlaps(
+        out,
+        overlap_area_threshold=overlap_area_threshold,
+    )
 
     out, hole_stats = strip_small_holes(
         out,
@@ -362,6 +329,56 @@ def topology_qa_and_fixes(
         "holes_removed_count": hole_stats["holes_removed_count"],
         "holes_preserved_count": hole_stats["holes_preserved_count"],
     }
+
+
+def resolve_overlaps(
+    gdf: gpd.GeoDataFrame,
+    overlap_area_threshold: float = 0.5,
+) -> tuple[gpd.GeoDataFrame, int]:
+    """Remove polygon overlaps by subtracting larger geometries from smaller ones."""
+    out = gdf.copy()
+    overlap_fixed_count = 0
+
+    if len(out) <= 1:
+        return out, overlap_fixed_count
+
+    sindex = out.sindex
+    checked: set[tuple[int, int]] = set()
+    updated_geoms = out.geometry.copy()
+
+    for idx, geom in out.geometry.items():
+        for cand in sindex.intersection(geom.bounds):
+            if cand == idx:
+                continue
+
+            key = tuple(sorted((idx, cand)))
+            if key in checked:
+                continue
+            checked.add(key)
+
+            if idx not in updated_geoms.index or cand not in updated_geoms.index:
+                continue
+
+            a = updated_geoms.loc[idx]
+            b = updated_geoms.loc[cand]
+            if a is None or b is None or a.is_empty or b.is_empty:
+                continue
+            if not a.intersects(b):
+                continue
+
+            inter_area = a.intersection(b).area
+            if inter_area <= overlap_area_threshold:
+                continue
+
+            if a.area >= b.area:
+                updated_geoms.loc[cand] = make_valid(b.difference(a))
+            else:
+                updated_geoms.loc[idx] = make_valid(a.difference(b))
+            overlap_fixed_count += 1
+
+    out.geometry = updated_geoms
+    out = out[~out.geometry.is_empty].copy()
+    return out, overlap_fixed_count
 
 
 def _longest_shared_boundary(shared_edge) -> float:
