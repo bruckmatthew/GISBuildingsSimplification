@@ -1,9 +1,10 @@
 import geopandas as gpd
-from shapely.geometry import box
+from shapely.geometry import Polygon, box
 
 from app.cleaning import (
     _is_commercial_or_industrial,
     commercial_industrial_merge_pass,
+    remove_narrow_ledges,
 )
 
 
@@ -112,3 +113,45 @@ def test_merge_pass_sets_merge_stats_in_attrs():
     assert stats.get("merged_feature_count") == 2
     assert "offices retail outlets" in stats.get("accepted_target_tokens", [])
     assert stats.get("observed_top_planning_tokens", {}).get("offices retail outlets") == 2
+
+
+def test_remove_narrow_ledges_removes_small_side_protrusion():
+    base = box(0, 0, 10, 10)
+    ledge = box(10, 4, 11, 6)
+    geom = base.union(ledge)
+
+    gdf = gpd.GeoDataFrame({"geometry": [geom]}, geometry="geometry", crs="EPSG:3857")
+
+    out, stats = remove_narrow_ledges(gdf, width_threshold_m=2.5, area_threshold_m2=3.0)
+
+    assert stats["ledge_fixed_count"] == 1
+    assert stats["ledge_removed_area_total"] > 1.5
+    cleaned_geom = out.geometry.iloc[0]
+    assert cleaned_geom.area < geom.area
+    assert cleaned_geom.area > base.area - 0.1
+
+
+def test_remove_narrow_ledges_skips_wide_or_large_removals():
+    base = box(0, 0, 10, 10)
+    wide_wing = box(10, 2, 14, 8)
+    geom = base.union(wide_wing)
+
+    gdf = gpd.GeoDataFrame({"geometry": [geom]}, geometry="geometry", crs="EPSG:3857")
+
+    out, stats = remove_narrow_ledges(gdf, width_threshold_m=2.0, area_threshold_m2=3.0)
+
+    assert stats["ledge_fixed_count"] == 0
+    assert out.geometry.iloc[0].equals_exact(geom, tolerance=1e-6)
+
+
+def test_remove_narrow_ledges_handles_multipolygon_parts():
+    poly_a = Polygon([(0, 0), (6, 0), (6, 6), (0, 6), (0, 0)])
+    poly_b = box(20, 20, 26, 26).union(box(26, 22, 27, 23))
+    multi = poly_a.union(poly_b)
+
+    gdf = gpd.GeoDataFrame({"geometry": [multi]}, geometry="geometry", crs="EPSG:3857")
+
+    out, stats = remove_narrow_ledges(gdf, width_threshold_m=2.2, area_threshold_m2=2.0)
+
+    assert stats["ledge_fixed_count"] == 1
+    assert out.geometry.iloc[0].area < multi.area

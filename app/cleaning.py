@@ -85,6 +85,115 @@ def _normalized_geom_hash(geom, snap_grid_m: float = 0.1) -> str:
     return hashlib.sha1(canonical.wkb).hexdigest()
 
 
+def _polygon_parts(geom) -> list[Polygon]:
+    if geom is None or geom.is_empty:
+        return []
+    if isinstance(geom, Polygon):
+        return [geom]
+    if isinstance(geom, MultiPolygon):
+        return [part for part in geom.geoms if part is not None and not part.is_empty]
+    return []
+
+
+def _minimum_width_estimate(geom) -> float:
+    if geom is None or geom.is_empty:
+        return 0.0
+    rect = geom.minimum_rotated_rectangle
+    if rect.is_empty:
+        return 0.0
+    coords = list(rect.exterior.coords)
+    if len(coords) < 5:
+        return 0.0
+    edges = []
+    for i in range(4):
+        x1, y1 = coords[i]
+        x2, y2 = coords[i + 1]
+        edges.append(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5)
+    return float(min(edges)) if edges else 0.0
+
+
+def _is_small_narrow_removed_piece(piece, width_threshold_m: float, area_threshold_m2: float) -> bool:
+    if piece is None or piece.is_empty:
+        return True
+
+    for component in _polygon_parts(piece):
+        if component.area > area_threshold_m2:
+            return False
+        if _minimum_width_estimate(component) > width_threshold_m:
+            return False
+    return True
+
+
+def remove_narrow_ledges(
+    gdf: gpd.GeoDataFrame,
+    width_threshold_m: float = 1.0,
+    area_threshold_m2: float = 8.0,
+) -> tuple[gpd.GeoDataFrame, dict[str, float]]:
+    """Remove narrow protrusions via morphological opening when loss is controlled."""
+    out = gdf.copy()
+    cleaned_geoms = []
+
+    ledge_fixed_count = 0
+    ledge_removed_area_total = 0.0
+    ledge_skipped_count = 0
+
+    distance = max(width_threshold_m / 2.0, 0.01)
+    max_loss_ratio = 0.2
+
+    for geom in out.geometry:
+        if geom is None or geom.is_empty:
+            cleaned_geoms.append(geom)
+            continue
+
+        valid_geom = make_valid(geom)
+        if valid_geom.is_empty:
+            cleaned_geoms.append(geom)
+            continue
+
+        original_area = float(valid_geom.area)
+        opened = valid_geom.buffer(-distance, join_style=2).buffer(distance, join_style=2)
+        opened = make_valid(opened)
+
+        if opened.is_empty:
+            cleaned_geoms.append(valid_geom)
+            ledge_skipped_count += 1
+            continue
+
+        removed = make_valid(valid_geom.difference(opened))
+        removed_area = float(removed.area) if not removed.is_empty else 0.0
+        if removed_area <= 0.0:
+            cleaned_geoms.append(valid_geom)
+            continue
+
+        cleaned = make_valid(valid_geom.difference(removed))
+        if cleaned.is_empty:
+            cleaned_geoms.append(valid_geom)
+            ledge_skipped_count += 1
+            continue
+
+        area_loss_ratio = removed_area / original_area if original_area > 0 else 0.0
+        should_replace = _is_small_narrow_removed_piece(
+            removed,
+            width_threshold_m=width_threshold_m,
+            area_threshold_m2=area_threshold_m2,
+        ) and area_loss_ratio <= max_loss_ratio
+
+        if should_replace:
+            cleaned_geoms.append(cleaned)
+            ledge_fixed_count += 1
+            ledge_removed_area_total += removed_area
+        else:
+            cleaned_geoms.append(valid_geom)
+            ledge_skipped_count += 1
+
+    out.geometry = cleaned_geoms
+    return out, {
+        "ledge_fixed_count": int(ledge_fixed_count),
+        "ledge_removed_area_total": float(ledge_removed_area_total),
+        "ledge_skipped_count": int(ledge_skipped_count),
+    }
+
+
 def simplify_geometry(
     gdf: gpd.GeoDataFrame,
     basemap: str,
