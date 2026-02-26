@@ -30,7 +30,7 @@ def run_pipeline(
         write_shapefile,
     )
     from app.review import run_corner_fix_review
-    from app.rules import recategorize_small_garages
+    from app.rules import recategorize_small_garages, remove_small_industrial_office_retail
 
     # 1) Load and validate input
     validation = validate_input_shapefile(input_path)
@@ -49,37 +49,40 @@ def run_pipeline(
         garage_reclass=garage_reclass,
     )
 
-    # 5) Corner-cleaning pass (auto-clean + review queue)
+    # 5) Remove small Industrial/Utilities and Offices, Retail Outlets buildings
+    gdf, removed_small_target_count = remove_small_industrial_office_retail(gdf, min_area_m2=200.0)
+
+    # 6) Corner-cleaning pass (auto-clean + review queue)
     gdf, needs_review_layer, review_stats = run_corner_fix_review(gdf, basemap=basemap)
 
-    # 6) Adjacent target merge pass (no recategorization)
+    # 7) Adjacent target merge pass (no recategorization)
     before_adjacent_target_merge_count = len(gdf)
     gdf = commercial_industrial_merge_pass(gdf)
     after_adjacent_target_merge_count = len(gdf)
     adjacent_target_merge_log = gdf.attrs.get("merge_log", [])
     adjacent_target_merge_stats = gdf.attrs.get("merge_stats", {})
 
-    # 7) Fill narrow inward indents after topology + merge
+    # 8) Fill narrow inward indents after topology + merge
     gdf, indent_stats = fill_narrow_indents(gdf)
 
-    # 8) Remove narrow ledges after indent fill
+    # 9) Remove narrow ledges after indent fill
     gdf, ledge_stats = remove_narrow_ledges(gdf)
 
-    # 9) Final overlap cleanup after all geometry-modifying passes
+    # 10) Final overlap cleanup after all geometry-modifying passes
     gdf, post_process_overlap_fixed_count = resolve_overlaps(gdf, overlap_area_threshold=0.0)
     topo_stats["overlap_fixed_count"] += post_process_overlap_fixed_count
     topo_stats["post_process_overlaps_fixed_count"] = post_process_overlap_fixed_count
 
-    # 10) Fill enclosed voids formed between polygons
+    # 11) Fill enclosed voids formed between polygons
     gdf, inter_polygon_voids_filled_count = fill_inter_polygon_voids(gdf, min_void_area=0.0)
     topo_stats["inter_polygon_voids_filled_count"] = inter_polygon_voids_filled_count
 
-    # 11) Re-run strict overlap cleanup after void filling
+    # 12) Re-run strict overlap cleanup after void filling
     gdf, post_void_overlap_fixed_count = resolve_overlaps(gdf, overlap_area_threshold=0.0)
     topo_stats["overlap_fixed_count"] += post_void_overlap_fixed_count
     topo_stats["post_void_overlaps_fixed_count"] = post_void_overlap_fixed_count
 
-    # 12) Final hole cleanup after all geometry-modifying passes
+    # 13) Final hole cleanup after all geometry-modifying passes
     gdf, post_merge_hole_stats = strip_small_holes(gdf)
     topo_stats["holes_removed_count"] += post_merge_hole_stats["holes_removed_count"]
     topo_stats["holes_preserved_count"] += post_merge_hole_stats["holes_preserved_count"]
@@ -93,7 +96,7 @@ def run_pipeline(
     topo_stats["indent_filled_area_total"] = indent_stats["indent_filled_area_total"]
     topo_stats["indent_skipped_count"] = indent_stats["indent_skipped_count"]
 
-    # 13) Export outputs and QA report
+    # 14) Export outputs and QA report
     export_info = write_shapefile(gdf, output_path)
     review_export = write_review_layer(needs_review_layer, output_path)
     if review_export is not None:
@@ -124,6 +127,7 @@ def run_pipeline(
             "qa_summary": qa_summary,
             **topo_stats,
             "recategorized_small_garages": recategorized_count,
+            "removed_small_industrial_office_retail": removed_small_target_count,
             "corner_cleaned_features": review_stats["auto_cleaned_count"],
             "corner_needs_review_features": review_stats["needs_review_count"],
             "review_basemap_provider": review_stats["provider"],
