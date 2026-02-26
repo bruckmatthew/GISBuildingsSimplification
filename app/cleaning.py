@@ -475,16 +475,19 @@ def resolve_overlaps(
     sindex = out.sindex
     checked: set[tuple[int, int]] = set()
     updated_geoms = out.geometry.copy()
+    index_labels = out.index.to_numpy()
 
-    for idx, geom in out.geometry.items():
-        for cand in sindex.intersection(geom.bounds):
-            if cand == idx:
+    for pos, (idx, geom) in enumerate(out.geometry.items()):
+        for cand_pos in sindex.intersection(geom.bounds):
+            if cand_pos == pos:
                 continue
 
-            key = tuple(sorted((idx, cand)))
+            key = tuple(sorted((pos, cand_pos)))
             if key in checked:
                 continue
             checked.add(key)
+
+            cand = index_labels[cand_pos]
 
             if idx not in updated_geoms.index or cand not in updated_geoms.index:
                 continue
